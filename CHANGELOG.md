@@ -13,4 +13,8 @@ The first public release.
   `--remote-allow-origins`, and only numbers interpolated into page scripts.
 - Fixes found while testing: web tabs with equal props shared their state; renaming the wrong Herdr
   tab; a reload leaving an old copy streaming; the engine not recovering when Chromium died; titles
-  of tabs agents opened never showing; quick tab switches racing; Chromium's blank start tab lingering.
+  of tabs agents opened never showing; quick tab switches racing; Chromium's blank start tab lingering;
+  the page on screen freezing when an agent opened a tab next to it (each web tab now gets its own
+  browser window, and agents' tabs land in a separate "dock" window); a relaunch failing while the old
+  Chromium still held the profile; CDP commands that never answered stalling a view; pages that never
+  move showing no frame on some headless builds.

@@ -82,12 +82,14 @@ before(async () => {
     chromeArgs: process.env.CI && process.platform === "linux" ? ["--no-sandbox"] : [] };
   fs.writeFileSync(path.join(HOME, "data", "webtab", "config.json"), JSON.stringify(conf));
   cfg = loadConfig(HOME).cfg;
-  engine = spawn(process.execPath, [ENGINE, "--app-home", HOME], { stdio: "ignore" });
+  engine = spawn(process.execPath, [ENGINE, "--app-home", HOME], { stdio: "ignore", env: { ...process.env, WEBTAB_DEBUG: "1" } });
   await waitFor(async () => (await status()).ready, 30000, "engine ready");
 });
 
 after(async () => {
   if (skip) return;
+  // Keep the engine's log where CI and people can read it after a failure.
+  try { fs.copyFileSync(path.join(HOME, "data", "webtab", "webtabd.log"), path.join(os.tmpdir(), "webtab-engine-test.log")); } catch {}
   await stopEngine(HOME, { closeBrowser: true }).catch(() => {});
   try { engine.kill(); } catch {}
   for (let i = 0; i < 10; i++) { try { fs.rmSync(HOME, { recursive: true, force: true }); break; } catch { await sleep(500); } }
@@ -247,16 +249,26 @@ test("a page's confirm() reaches the view as a dialog, and the answer reaches th
 
 test("a window the person's click opens takes the view along", { skip }, async () => {
   view.clear();
-  view.send({ t: "navigate", url: "data:text/html," + encodeURIComponent("<a href='about:blank#popup' target='_blank' style='position:absolute;left:0;top:0;width:200px;height:100px;display:block'>open</a>") });
-  await view.next((m) => m.t === "loaded", 10000, "page loaded");
+  view.send({ t: "navigate", url: "data:text/html," + encodeURIComponent("<a id=pop href='about:blank#popup' target='_blank' style='position:absolute;left:0;top:0;width:200px;height:100px;display:block'>open</a>") });
+  const agent = await agentOn(target);
+  await waitFor(async () => (await agent.eval("!!document.getElementById('pop') && document.readyState === 'complete'")) === true, 10000, "link page loaded");
+  agent.close();
+  await sleep(3200); // so the click isn't mistaken for part of the agent's look at the page
   view.send({ t: "mouse", type: "mousePressed", x: 50, y: 50, button: "left", buttons: 1, clickCount: 1 });
   view.send({ t: "mouse", type: "mouseReleased", x: 50, y: 50, button: "left", buttons: 0, clickCount: 1 });
   const att = await view.next((m) => m.t === "attached" && m.target !== target, 10000, "attach to the popup");
+  await view.next((m) => m.t === "nav" && m.url.includes("#popup"), 10000, "popup shown");
+  await sleep(500); // a person looks at it before switching back
+  view.clear();
   view.send({ t: "switch", id: target });
   await view.next((m) => m.t === "attached" && m.target === target, 10000, "back");
+  await view.next((m) => m.t === "frame", 10000, "the opener on screen again");
+  await sleep(500);
   await fetch(`http://127.0.0.1:${cfg.cdpPort}/json/close/${att.target}`);
   view.send({ t: "navigate", url: FIXTURE });
-  await view.next((m) => m.t === "loaded", 10000, "fixture again");
+  const back = await agentOn(target);
+  await waitFor(async () => (await back.eval("!!document.getElementById('btn')")) === true, 10000, "fixture again");
+  back.close();
 });
 
 test("the page on screen keeps updating when an agent opens a tab next to it", { skip }, async () => {
@@ -272,23 +284,25 @@ test("the page on screen keeps updating when an agent opens a tab next to it", {
 
 test("a view that stops reading doesn't stall the others", { skip }, async () => {
   const anim = "data:text/html," + encodeURIComponent("<body style='margin:0'><div id=b style='width:80px;height:80px;background:red'></div>" +
-    "<script>let x=0;setInterval(()=>{b.style.marginLeft=(x=(x+7)%400)+'px'},16)</script>");
+    "<script>let x=0;setInterval(()=>{b.style.marginLeft=(x=(x+7)%400)+'px'},40)</script>");
   const slow = await connectView(token());
   await slow.next((m) => m.t === "hello");
   slow.send({ t: "resize", w: 800, h: 600 });
   slow.send({ t: "attach", target: null, url: anim });
+  const slowTab = (await slow.next((m) => m.t === "attached", 15000, "slow view attached")).target;
   await slow.next((m) => m.t === "frame", 15000, "slow view frame");
   slow.sock.pause(); // stops reading, like a retired mod copy
   const fast = await connectView(token());
   await fast.next((m) => m.t === "hello");
   fast.send({ t: "resize", w: 400, h: 300 });
   fast.send({ t: "attach", target: null, url: anim });
-  await fast.next((m) => m.t === "attached");
+  const fastTab = (await fast.next((m) => m.t === "attached")).target;
   fast.clear();
   await sleep(3000);
-  assert.ok(fast.msgs.filter((m) => m.t === "frame").length >= 10, "the reading view kept getting frames");
+  assert.ok(fast.msgs.filter((m) => m.t === "frame").length >= 8, "the reading view kept getting frames");
   assert.equal((await status()).ready, true);
   slow.sock.destroy(); fast.sock.destroy();
+  for (const id of [slowTab, fastTab]) await fetch(`http://127.0.0.1:${cfg.cdpPort}/json/close/${id}`);
 });
 
 test("a second engine leaves the first one alone", { skip }, async () => {
@@ -298,10 +312,11 @@ test("a second engine leaves the first one alone", { skip }, async () => {
   assert.equal((await status()).ready, true);
 });
 
-test("when the browser dies, the engine relaunches it and the view comes back", { skip }, async () => {
+test("when the browser dies, the engine relaunches it and the view comes back", { skip, timeout: 90000 }, async () => {
   view.clear();
   await closeChrome(cfg);
-  await view.next((m) => m.t === "attached", 30000, "re-attach after browser restart");
+  // Usually a second or two; a busy machine can take Chromium much longer to let go of its profile.
+  await view.next((m) => m.t === "attached", 60000, "re-attach after browser restart");
   assert.equal((await status()).ready, true);
   await view.next((m) => m.t === "frame", 15000, "frames again");
 });

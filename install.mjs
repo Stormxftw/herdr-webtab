@@ -98,17 +98,19 @@ if (has("--menu")) {
     let shipped = new Set();
     try { shipped = new Set(Object.keys(JSON.parse(fs.readFileSync(path.join(HOME, "installed.json"), "utf8")))); } catch {}
     const OLD = /openOverlay\(\{\s*mod:\s*"new-menu",\s*kind:\s*"popup",\s*width:\s*(\d+),\s*height:\s*(\d+)\s*\}\)/g;
-    const patched = [];
+    const patched = [], already = [];
     for (const m of fs.readdirSync(path.join(HOME, "mods"))) {
       const f = path.join(HOME, "mods", m, "main.js");
       if (shipped.has(m) || ["new-menu", "new-menu-web"].includes(m) || !fs.existsSync(f)) continue;
       const src = fs.readFileSync(f, "utf8");
+      if (src.includes(MARK)) { already.push(m); continue; }
       if (!src.match(OLD)) continue;
       if (!fs.existsSync(f + ".before-webtab")) fs.copyFileSync(f, f + ".before-webtab");
       fs.writeFileSync(f, src.replace(OLD, (_, w, h) => `openOverlay({ mod: "new-menu-web", kind: "popup", width: ${w}, height: ${Math.max(+h, 560)} ${MARK}${h} */ })`));
       patched.push(m);
     }
-    say(patched.length ? `+ menu: ${patched.join(", ")} (backups: main.js.before-webtab)`
+    const all = [...patched, ...already];
+    say(all.length ? `+ menu: ${all.join(", ")}${patched.length ? " (backups: main.js.before-webtab)" : " (already set up)"}`
       : "+ menu: no tab bars of your own open the + menu; Herdr's shipped tab bar stays as shipped, so use the command palette");
   }
 }

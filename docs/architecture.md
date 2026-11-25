@@ -27,6 +27,20 @@ still for 280 ms, the engine sends a quality-92 screenshot in place of the last 
 If the mod falls behind (more than 256 KB unread on its socket), stream frames are skipped; a reader
 with more than 8 MB unread is disconnected.
 
+## Windows, and why there's a "dock"
+
+A headless Chromium window paints only its front tab: a tab behind another gets no screencast frames,
+and screenshots of it take seconds. Chrome also puts every new tab (an agent's `new_page`,
+`/json/new`) into the newest window. So:
+
+- every tab Herdr opens gets a window of its own (`Target.createTarget {newWindow: true}`);
+- the engine keeps an empty **dock** window as the newest window, so tabs agents open land there
+  instead of covering a page someone is watching (the dock's blank tab is left out of tab lists);
+- when someone starts watching a tab that is in the dock window, or an agent uses the dock's blank
+  tab, a new dock is made;
+- if a watched page still ends up behind another tab, the engine brings it to the front (at most
+  every 2 s, so two web tabs showing tabs of one window can't fight).
+
 ## Input
 
 Mouse and wheel events are queued per view with one in flight at a time: moves coalesce to the

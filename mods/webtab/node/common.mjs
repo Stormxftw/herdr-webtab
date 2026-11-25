@@ -195,16 +195,57 @@ export async function stopEngine(home, { closeBrowser = true } = {}) {
   return { stopped };
 }
 
-/** Closes the Chromium on cfg.cdpPort through the DevTools protocol. */
+/** Is a process still running? */
+export function alive(pid) {
+  if (!pid) return false;
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code === "EPERM"; }
+}
+
+/** Ends a Chromium and its helper processes (helpers can hold the profile after the main one is gone). */
+export function killTree(pid) {
+  if (!pid) return;
+  try {
+    if (IS_WIN) execFileSync("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+    else process.kill(-pid, "SIGKILL"); // launched detached: it leads its own process group
+  } catch { try { process.kill(pid, "SIGKILL"); } catch {} }
+}
+
+/**
+ * Waits for a Chromium that was asked to close to exit, and ends it if it doesn't. Headless Chromium
+ * closes its DevTools port at once but can take 10-30 s more to exit, holding the profile all along,
+ * so nothing else can use the profile until it's gone.
+ */
+export async function waitExit(pid, graceMs = 3000) {
+  for (const end = Date.now() + graceMs; alive(pid) && Date.now() < end; ) await new Promise((r) => setTimeout(r, 100));
+  if (alive(pid)) killTree(pid);
+  for (let i = 0; i < 30 && alive(pid); i++) await new Promise((r) => setTimeout(r, 100));
+}
+
+/** The browser process behind a DevTools websocket, asked over that socket (so it's never a stale pid). */
+function browserPidOver(ws) {
+  return new Promise((r) => {
+    ws.onmessage = (e) => { const m = JSON.parse(e.data); if (m.id === 1) r(m.result?.processInfo?.find((p) => p.type === "browser")?.id ?? null); };
+    ws.send(JSON.stringify({ id: 1, method: "SystemInfo.getProcessInfo" }));
+    setTimeout(() => r(null), 2000);
+  });
+}
+
+/** Closes the Chromium on cfg.cdpPort through the DevTools protocol, and waits until it has exited. */
 export async function closeChrome(cfg) {
   const ver = await (await fetch(`http://127.0.0.1:${cfg.cdpPort}/json/version`, { signal: AbortSignal.timeout(2000) })).json();
+  let pid = null;
   await new Promise((resolve) => {
     const ws = new WebSocket(ver.webSocketDebuggerUrl);
     const done = () => { try { ws.close(); } catch {} resolve(); };
-    ws.onopen = () => ws.send(JSON.stringify({ id: 1, method: "Browser.close" }));
-    ws.onmessage = done; ws.onerror = done; ws.onclose = done;
-    setTimeout(done, 3000);
+    ws.onopen = async () => {
+      pid = await browserPidOver(ws);
+      ws.onmessage = done;
+      ws.send(JSON.stringify({ id: 2, method: "Browser.close" }));
+    };
+    ws.onerror = done; ws.onclose = done;
+    setTimeout(done, 5000);
   });
+  await waitExit(pid);
 }
 
 /** Where --autostart puts the login item on this platform. */

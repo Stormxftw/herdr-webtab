@@ -81,6 +81,7 @@ test("running install again changes nothing it shouldn't and prunes stale files"
   fs.writeFileSync(path.join(APP, "mods/webtab/config.js"), "// left by an older version\n");
   const out = sh("install.mjs", ...installArgs);
   assert.match(out, /already opens a web tab/);
+  assert.match(out, /\+ menu: my-tabs \(already set up\)/);
   assert.ok(!exists(APP, "mods/webtab/config.js"), "stale file pruned");
   assert.equal(read(APP, "AGENTS.local.md").split("herdr-webtab:start").length - 1, 1);
   assert.equal(read(USER, ".codex/config.toml").split("[mcp_servers.webtab]").length - 1, 1);

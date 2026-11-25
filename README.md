@@ -152,6 +152,11 @@ editing with `node ~/.config/herdr-app/mods/webtab/node/webtabd.mjs --stop`):
 - **Not supported:** file upload pickers, downloads, extensions, printing, and drag and drop of files
   from your desktop.
 - **Two web tabs on the same browser tab** share one viewport size.
+- **Each web tab gets its own browser window** (all invisible). Headless Chromium paints only the
+  front tab of a window, so tabs that agents open go into a separate window and can't freeze the page
+  you're watching. See [docs/architecture.md](docs/architecture.md).
+- **Something wrong?** The engine logs to `data/webtab/webtabd.log` in your Herdr config folder. Start
+  it with `WEBTAB_DEBUG=1` for timings, tab switches and visibility changes.
 
 ## Contributing
 

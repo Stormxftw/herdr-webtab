@@ -20,7 +20,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import {
-  VERSION, appHome, loadConfig, findChrome, systemDpr, ensureEngine, stopEngine, engineStatus, newToken, fwd,
+  VERSION, appHome, loadConfig, findChrome, systemDpr, ensureEngine, stopEngine, engineStatus, newToken, fwd, alive, waitExit,
 } from "./common.mjs";
 
 const args = process.argv.slice(2);
@@ -46,6 +46,7 @@ const log = (...a) => {
   if (process.stdout.isTTY) console.log(line);
   try { fs.appendFileSync(P.log, line + "\n"); } catch {}
 };
+const debug = process.env.WEBTAB_DEBUG ? log : () => {};
 process.on("uncaughtException", (e) => { log("fatal:", e.stack || e); process.exit(1); });
 process.on("unhandledRejection", (e) => log("unhandled:", e?.stack || e));
 for (const f of fs.readdirSync(P.frames)) if (/\.jpg$/.test(f)) fs.unlink(path.join(P.frames, f), () => {});
@@ -64,25 +65,47 @@ const listen = (server, port) => new Promise((resolve) => {
 
 // ---------- Chromium ----------
 async function cdpUp() { try { return (await fetch(`${CDP}/json/version`, { signal: AbortSignal.timeout(1500) })).ok; } catch { return false; } }
-let launching = null;
+let launching = null, chromePid = null;
 const spare = new Set(); // the blank tab a browser we launched starts with: the first page reuses it
 function ensureChrome() {
   return launching ||= (async () => {
     if (await cdpUp()) return;
     const exe = findChrome(cfg);
     if (!exe) throw new Error("no Chrome or Chromium found: install one, or set \"chrome\" in " + fwd(P.config));
-    log("launching", exe);
     fs.mkdirSync(cfg.profile, { recursive: true });
-    // No --remote-allow-origins: web pages must never reach this browser's DevTools socket.
-    spawn(exe, ["--headless=new", `--remote-debugging-port=${cfg.cdpPort}`, "--remote-debugging-address=127.0.0.1",
-      `--user-data-dir=${cfg.profile}`, "--no-first-run", "--no-default-browser-check", "--disable-sync",
-      "--disable-features=Translate,MediaRouter", ...(Array.isArray(cfg.chromeArgs) ? cfg.chromeArgs.map(String) : []), "about:blank"],
-      { detached: true, stdio: "ignore", windowsHide: true }).unref();
-    for (let i = 0; i < 100 && !(await cdpUp()); i++) await new Promise((r) => setTimeout(r, 150));
-    if (!(await cdpUp())) throw new Error("Chromium did not open its DevTools port " + cfg.cdpPort);
-    try { for (const t of await (await fetch(`${CDP}/json/list`)).json()) if (t.type === "page" && t.url === "about:blank") spare.add(t.id); } catch {}
+    // The browser we were connected to closed its DevTools port, but may linger for a while holding
+    // the profile; a new one would hand over to it and exit. Give it a moment, then end it.
+    if (alive(chromePid)) { debug("waiting for the old browser to exit"); await waitExit(chromePid); }
+    chromePid = null;
+    for (let attempt = 0; attempt < 40; attempt++) {
+      log("launching", exe);
+      // No --remote-allow-origins: web pages must never reach this browser's DevTools socket.
+      const chrome = spawn(exe, ["--headless=new", `--remote-debugging-port=${cfg.cdpPort}`, "--remote-debugging-address=127.0.0.1",
+        `--user-data-dir=${cfg.profile}`, "--no-first-run", "--no-default-browser-check", "--disable-sync",
+        // A page on screen in Herdr must never be throttled as "in the background" (Puppeteer sets these too).
+        "--disable-backgrounding-occluded-windows", "--disable-renderer-backgrounding", "--disable-background-timer-throttling",
+        "--disable-features=Translate,MediaRouter,CalculateNativeWinOcclusion", ...(Array.isArray(cfg.chromeArgs) ? cfg.chromeArgs.map(String) : []), "about:blank"],
+        { detached: true, stdio: "ignore", windowsHide: true });
+      let exited = false;
+      chrome.on("exit", () => { exited = true; });
+      chrome.on("error", () => { exited = true; });
+      chrome.unref();
+      for (let i = 0; i < 100 && !exited && !(await cdpUp()); i++) await new Promise((r) => setTimeout(r, 150));
+      if (await cdpUp()) {
+        chromePid = chrome.pid;
+        try { for (const t of await (await fetch(`${CDP}/json/list`)).json()) if (t.type === "page" && t.url === "about:blank") spare.add(t.id); } catch {}
+        return;
+      }
+      if (!exited) { killTree(chrome.pid); throw new Error("Chromium did not open its DevTools port " + cfg.cdpPort); }
+      // It left at once: another Chromium holds this profile (one this engine didn't start). Wait for it.
+      if (attempt === 0) log("another Chromium is using the profile; waiting for it to exit");
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    throw new Error("another Chromium keeps this profile busy: " + fwd(cfg.profile));
   })().finally(() => { launching = null; });
 }
+
+
 
 // ---------- browser-wide: tabs and agent activity ----------
 const views = new Set();
@@ -91,7 +114,7 @@ let claim = null;                // { name, target, at }: an agent said who it i
 let browserWs = null, bid = 0;
 const broadcast = (o) => { for (const v of views) v.emit(o); };
 let tabsTimer = null;
-const sendTabs = () => { clearTimeout(tabsTimer); tabsTimer = setTimeout(() => broadcast({ t: "tabs", tabs: [...tabs.values()] }), 60); };
+const sendTabs = () => { clearTimeout(tabsTimer); tabsTimer = setTimeout(() => broadcast({ t: "tabs", tabs: visibleTabs() }), 60); };
 // Input or navigation from any web tab showing this target counts as the person's.
 const lastLocal = (target, kind) => Math.max(0, ...[...views].filter((v) => v.target === target).map((v) => v[kind]));
 const anyLocalNav = () => Math.max(0, ...[...views].map((v) => v.lastLocalNav));
@@ -108,15 +131,38 @@ function browserSend(method, params = {}) {
   return new Promise((r) => { const i = ++bid; browserPending.set(i, r); browserWs.send(JSON.stringify({ id: i, method, params })); setTimeout(() => { if (browserPending.delete(i)) r(null); }, 5000); });
 }
 
+// A browser window paints only its front tab, and Chrome puts new tabs (an agent's new_page) in the
+// newest window. So every tab Herdr opens gets a window of its own, and an empty "dock" window is
+// kept newest: agents' tabs land there instead of covering a page someone is watching.
+const docks = new Set();
+let dock = null, dockWindow = null, docking = null;
+const windowOf = async (targetId) => (await browserSend("Browser.getWindowForTarget", { targetId }))?.windowId ?? null;
+function newDock() {
+  return docking ||= (async () => {
+    const r = await browserSend("Target.createTarget", { url: "about:blank", newWindow: true });
+    if (!r?.targetId) return;
+    const prev = dock;
+    dock = r.targetId; docks.add(dock); dockWindow = await windowOf(dock);
+    // The old dock's blank tab isn't needed any more (its window may hold agent tabs; they stay).
+    if (prev && prev !== dock && docks.has(prev) && ![...views].some((v) => v.target === prev)) fetch(`${CDP}/json/close/${prev}`).catch(() => {});
+  })().finally(() => { docking = null; });
+}
+const visibleTabs = () => [...tabs.values()].filter((t) => !docks.has(t.id));
+
 async function watchBrowser() {
   const ver = await (await fetch(`${CDP}/json/version`)).json();
   const ws = new WebSocket(ver.webSocketDebuggerUrl);
   await new Promise((r, j) => { ws.onopen = r; ws.onerror = () => j(new Error("browser websocket failed")); });
   browserWs = ws;
+  // Ask the browser its pid (rather than remembering one), so a later cleanup can't hit a reused pid.
+  const pidReq = ++bid;
   ws.onmessage = (e) => {
     const m = JSON.parse(e.data), p = m.params;
+    if (m.id === pidReq) { chromePid = m.result?.processInfo?.find((x) => x.type === "browser")?.id ?? chromePid; return; }
     if (m.id && browserPending.has(m.id)) { browserPending.get(m.id)(m.result ?? null); browserPending.delete(m.id); return; }
     if (m.method === "Target.targetDestroyed") {
+      docks.delete(p.targetId);
+      if (p.targetId === dock) { dock = null; if (!quitting) newDock().catch(() => {}); }
       if (tabs.delete(p.targetId)) sendTabs();
       for (const v of views) if (v.target === p.targetId) v.targetGone();
       return;
@@ -127,11 +173,14 @@ async function watchBrowser() {
       const prev = tabs.get(i.targetId);
       tabs.set(i.targetId, { id: i.targetId, url: i.url, title: i.title || i.url });
       const now = Date.now();
+      // Someone used the dock's blank tab (an agent navigating it): it's a real tab now; dock anew.
+      if (docks.has(i.targetId) && i.url !== "about:blank") { docks.delete(i.targetId); if (i.targetId === dock) { dock = null; newDock().catch(() => {}); } }
       // A tab nobody in Herdr touched just navigated: an agent did it.
       if (prev && prev.url !== i.url && now - lastLocal(i.targetId, "lastLocalNav") > 3000 && now - lastLocal(i.targetId, "lastLocalInput") > 1500 && i.url !== "about:blank") agentActive(i.targetId, "navigated");
       // A new tab with no opener page, while nobody in Herdr asked for one: an agent opened it.
-      if (!prev && m.method === "Target.targetCreated" && !i.openerId && now - anyLocalNav() > 3000) agentActive(i.targetId, "opened");
+      if (!prev && m.method === "Target.targetCreated" && !i.openerId && i.url !== "about:blank" && now - anyLocalNav() > 3000) agentActive(i.targetId, "opened");
       // A link or button the person just clicked opened a window: take them to it, like a browser does.
+      if (!prev && m.method === "Target.targetCreated") debug(`target created ${i.targetId.slice(0, 6)} opener ${i.openerId?.slice(0, 6) || "-"} ${i.url.slice(0, 40)}`);
       if (!prev && m.method === "Target.targetCreated" && i.openerId) {
         for (const v of views) if (v.target === i.openerId && now - v.lastLocalInput < 2000) { v.lastLocalNav = now; v.attach(i.targetId, null).catch(() => {}); }
       }
@@ -144,9 +193,13 @@ async function watchBrowser() {
     log("browser connection lost; reconnecting");
     reconnectBrowser();
   };
+  ws.send(JSON.stringify({ id: pidReq, method: "SystemInfo.getProcessInfo" }));
   ws.send(JSON.stringify({ id: ++bid, method: "Target.setDiscoverTargets", params: { discover: true } }));
   tabs.clear();
   for (const t of await (await fetch(`${CDP}/json/list`)).json()) if (t.type === "page") tabs.set(t.id, { id: t.id, url: t.url, title: t.title || t.url });
+  docks.clear(); dock = null;
+  for (const t of tabs.values()) if (t.url === "about:blank" && !spare.has(t.id)) docks.add(t.id); // left by an earlier engine
+  await newDock();
 }
 
 // Chrome reports a target's title only when its URL changes, so titles set later (most pages, and
@@ -208,6 +261,20 @@ class View {
     views.add(this);
     // Keeps the mod's socket read from idling out.
     this.heartbeat = setInterval(() => this.emit({ t: "ping" }), 10000);
+    // Watchdog: no frames for a while can mean the page slipped behind another tab without us
+    // hearing about it (Chrome activates a popup a moment after creating it). Check, and fix.
+    this.lastFrameAt = Date.now();
+    this.watchdog = setInterval(async () => {
+      if (this.closed || this.watching || !this.ws || Date.now() - this.lastFrameAt < 2500) return;
+      this.watching = true;
+      try {
+        if ((await this.evalv("document.visibilityState")) === "hidden") {
+          debug(`view ${this.vid}: watchdog found the page behind another tab`);
+          this.hidden = false; this.lastFront = 0; this.setHidden(true);
+        }
+        this.lastFrameAt = Date.now();
+      } finally { this.watching = false; }
+    }, 1000);
   }
   emit(o) {
     if (this.sock.destroyed) return;
@@ -215,18 +282,25 @@ class View {
     if (this.sock.writableLength > 8e6) { log(`view ${this.vid} stopped reading; dropping it`); this.sock.destroy(); return; }
     this.sock.write(JSON.stringify(o) + "\n");
   }
+  // Every command resolves: with its result, or null after 8 s (a stuck screenshot must not stall the view).
   send(method, params = {}) {
     if (!this.ws || this.ws.readyState !== 1) return Promise.resolve(null);
-    return new Promise((r) => { const i = ++this.id; this.pending.set(i, r); this.ws.send(JSON.stringify({ id: i, method, params })); });
+    return new Promise((r) => {
+      const i = ++this.id;
+      const timer = setTimeout(() => { if (this.pending.delete(i)) { debug(`view ${this.vid}: ${method} timed out`); r(null); } }, 8000);
+      this.pending.set(i, (v) => { clearTimeout(timer); r(v); });
+      this.ws.send(JSON.stringify({ id: i, method, params }));
+    });
   }
   async evalv(expression) { const r = await this.send("Runtime.evaluate", { expression, returnByValue: true }); return r?.result?.value; }
 
   // Resolves to [tab id, address still to open in it].
   async newTab(url) {
+    if (!browserWs || browserWs.readyState !== 1) throw new Error("the browser is restarting");
     this.lastLocalNav = Date.now();
     for (const id of spare) {
       spare.delete(id);
-      if (tabs.get(id)?.url === "about:blank" && ![...views].some((v) => v.target === id)) return [id, url || cfg.home];
+      if (tabs.get(id)?.url === "about:blank" && ![...views].some((v) => v.target === id)) { docks.delete(id); return [id, url || cfg.home]; }
     }
     // Each tab Herdr opens gets its own browser window: a window paints only its front tab, and a
     // tab an agent opens next to it would otherwise put the one on screen in the background.
@@ -235,11 +309,13 @@ class View {
     let id = r?.targetId;
     if (!id) id = (await (await fetch(`${CDP}/json/new?${encodeURIComponent(want)}`, { method: "PUT" })).json()).id;
     if (!tabs.has(id)) tabs.set(id, { id, url: want, title: want });
+    await newDock(); // keep the dock the newest window
     return [id, null];
   }
   async attach(targetId, url) {
     // Two quick switches: only the newest attach may go on (an older one must not navigate the new page).
     const seq = this.attachSeq = (this.attachSeq || 0) + 1;
+    debug(`view ${this.vid}: attach ${targetId?.slice(0, 6) || "new"} ${url ? url.slice(0, 40) : ""}`);
     const stale = () => seq !== this.attachSeq || this.closed;
     let id = targetId && tabs.has(targetId) ? targetId : null;
     if (!id) [id, url] = await this.newTab(url);
@@ -251,7 +327,17 @@ class View {
     await new Promise((r, j) => { ws.onopen = r; ws.onerror = () => j(new Error("page websocket failed")); });
     if (stale()) { ws.close(); return; }
     this.ws = ws;
-    ws.onmessage = (e) => this.onCdp(JSON.parse(e.data));
+    // Only the current page connection counts: a closing one can still deliver events (frames, "I'm
+    // hidden now", input seen) that belong to the page we just left.
+    ws.onmessage = (e) => { if (this.ws === ws) this.onCdp(JSON.parse(e.data)); };
+    // First, before anything else: a tab behind another one answers CDP commands only slowly, so
+    // bring it forward, but only if it is behind (bringing tabs forward needlessly races Chrome's
+    // own tab switching, e.g. a popup closing).
+    if ((await this.send("Runtime.evaluate", { expression: "document.visibilityState", returnByValue: true }))?.result?.value === "hidden") {
+      debug(`view ${this.vid}: ${id.slice(0, 6)} is behind another tab; bringing it forward`);
+      await this.send("Page.bringToFront");
+    }
+    if (stale()) return;
     ws.onclose = () => {
       if (this.ws !== ws || this.closed) return;
       this.ws = null;
@@ -266,11 +352,15 @@ class View {
     if (stale()) return;
     const info = tabs.get(id) || { url: "", title: "" };
     this.emit({ t: "attached", target: id, url: info.url, title: info.title || "", cdp: CDP, dpr: DPR });
-    this.emit({ t: "tabs", tabs: [...tabs.values()] });
+    this.emit({ t: "tabs", tabs: visibleTabs() });
     await this.applySize();
     if (stale()) return;
-    await this.send("Page.bringToFront");
+    // Watching a tab in the dock window: new agent tabs would cover it, so the dock moves on.
+    if (dockWindow !== null && (await windowOf(id)) === dockWindow) await newDock();
+    if (stale()) return;
+    docks.delete(id);
     this.setHidden((await this.evalv("document.visibilityState")) === "hidden");
+    this.settle(this.seq);
     if (url) { this.lastLocalNav = Date.now(); await this.send("Page.navigate", { url }); return; }
     // The page may have loaded before we attached (a tab opened with a URL, or switched to): its
     // load events are gone, so send its address and title now.
@@ -279,33 +369,34 @@ class View {
     await this.title();
   }
   reattach() {
-    if (this.closed || this.reattaching) return;
+    // No browser connection: the browser is restarting, and reconnectBrowser() re-attaches every view.
+    if (this.closed || this.reattaching || !browserWs || browserWs.readyState !== 1) return;
     this.reattaching = true;
     const want = this.target && tabs.has(this.target) ? this.target : [...tabs.keys()][0] || null;
     this.attach(want, null).catch((e) => this.emit({ t: "status", status: "error: " + e.message })).finally(() => { this.reattaching = false; });
   }
   async targetGone() {
-    const next = [...tabs.values()].find((t) => t.id !== this.target);
+    // When the whole browser is closing, every tab goes at once: leave it to the reconnect, rather
+    // than opening a tab in a browser that's shutting down (that can keep it from ever exiting).
+    const ws = browserWs;
+    await new Promise((r) => setTimeout(r, 300));
+    if (!ws || browserWs !== ws || ws.readyState !== 1 || this.closed) return;
+    const next = visibleTabs().find((t) => t.id !== this.target);
     this.emit({ t: "status", status: "tab closed" });
     this.target = null;
     await this.attach(next?.id || null, next ? null : cfg.home).catch((e) => this.emit({ t: "status", status: "error: " + e.message }));
   }
-  // A background tab gets no screencast frames. Screenshots still render, so poll those until
-  // the tab is in front again (the person clicking it brings it to the front).
+  // A background tab gets no screencast frames (and its screenshots take seconds). If the page on
+  // screen went behind another tab in its window, bring it back, at most every 2 s so two web tabs
+  // showing tabs of one window can't fight over it.
   setHidden(hidden) {
     if (hidden === !!this.hidden) return;
+    debug(`view ${this.vid}: ${hidden ? "hidden" : "visible"} (${this.target?.slice(0, 6)})`);
     this.hidden = hidden;
-    clearInterval(this.pollTimer);
-    if (hidden) {
-      this.pollTimer = setInterval(async () => {
-        if (this.polling || this.closed) return;
-        this.polling = true;
-        try {
-          const r = await this.send("Page.captureScreenshot", { format: "jpeg", quality: cfg.quality });
-          if (r?.data && r.data !== this.lastData) { this.lastData = r.data; this.countFrame(); this.writeFrame(r.data, this.size.w, this.size.h, false); }
-        } finally { this.polling = false; }
-      }, 250);
-    } else this.applySize().catch(() => {}); // restart the screencast
+    if (hidden && Date.now() - (this.lastFront || 0) > 2000) {
+      this.lastFront = Date.now();
+      this.send("Page.bringToFront").then(() => this.applySize()).catch(() => {});
+    } else if (!hidden) this.applySize().catch(() => {}); // restart the screencast
   }
   countFrame() { const s = this.stats; s.frames++; const dt = Date.now() - s.t0; if (dt > 1000) { s.fps = +(s.frames * 1000 / dt).toFixed(1); s.frames = 0; s.t0 = Date.now(); } }
   // A window being resized sends many sizes; restart the screencast once it settles.
@@ -315,6 +406,7 @@ class View {
     this.resizeTimer = setTimeout(() => this.applySize().catch(() => {}), 120);
   }
   async applySize() {
+    debug(`view ${this.vid}: screencast ${this.size.w}x${this.size.h} on ${this.target?.slice(0, 6)}`);
     await this.send("Emulation.setDeviceMetricsOverride", { width: this.size.w, height: this.size.h, deviceScaleFactor: DPR, mobile: false });
     await this.send("Page.stopScreencast");
     this.lastData = "";
@@ -323,11 +415,12 @@ class View {
   writeFrame(b64, w, h, hq) {
     if (this.closed) return;
     // Behind already: skip this frame rather than queue it (the settled sharp frame still comes).
-    if (!hq && this.sock.writableLength > 256e3) return;
+    if (!hq && this.sock.writableLength > 256e3) return; // the view is behind: drop this frame
     const name = `v${this.vid}-${this.n++}.jpg`;
     fs.writeFileSync(path.join(P.frames, name), Buffer.from(b64, "base64"));
     // image() loads files asynchronously; the mod keeps a few drawn frames under the newest, so keep them on disk too.
     this.files.push(name); while (this.files.length > 12) fs.unlink(path.join(P.frames, this.files.shift()), () => {});
+    this.lastFrameAt = Date.now();
     this.emit({ t: "frame", file: `${P.framesRel}/${name}`, w, h, fps: this.stats.fps, hq: !!hq });
   }
   onCdp(m) {
@@ -339,15 +432,9 @@ class View {
       this.lastData = p.data; const seq = ++this.seq;
       this.countFrame();
       this.writeFrame(p.data, p.metadata.deviceWidth, p.metadata.deviceHeight, false);
-      // Once the page settles, replace the stream frame with a sharper one.
-      clearTimeout(this.hqTimer);
-      this.hqTimer = setTimeout(async () => {
-        if (seq !== this.seq) return;
-        const r = await this.send("Page.captureScreenshot", { format: "jpeg", quality: 92 });
-        if (r?.data && seq === this.seq) this.writeFrame(r.data, this.size.w, this.size.h, true);
-      }, 280);
+      this.settle(seq);
     } else if (m.method === "Page.frameNavigated" && !p.frame.parentId) this.emit({ t: "nav", url: p.frame.url });
-    else if (m.method === "Page.loadEventFired") { this.emit({ t: "loaded" }); this.title(); }
+    else if (m.method === "Page.loadEventFired") { this.emit({ t: "loaded" }); this.title(); this.settle(this.seq); }
     else if (m.method === "Page.frameStartedLoading") this.emit({ t: "loading" });
     else if (m.method === "Page.domContentEventFired") this.title();
     // Headless Chromium draws no alert/confirm/prompt/beforeunload: the page waits until someone answers.
@@ -356,6 +443,20 @@ class View {
     else if (m.method === "Runtime.bindingCalled" && p.name === "__webtabSeen") {
       if (Date.now() - lastLocal(this.target, "lastLocalInput") > 600) agentActive(this.target, "input");
     } else if (m.method === "Runtime.bindingCalled" && p.name === "__webtabVis") this.setHidden(p.payload === "hidden");
+  }
+  // Once the page is still, draw a sharper screenshot over the last stream frame. Also runs after
+  // each load and attach: some headless builds send no screencast frame for a page that never moves.
+  settle(seq) {
+    clearTimeout(this.hqTimer);
+    this.hqTimer = setTimeout(async () => {
+      if (seq !== this.seq || this.closed) return;
+      if (this.polling) return this.settle(seq); // one screenshot at a time
+      this.polling = true;
+      try {
+        const r = await this.send("Page.captureScreenshot", { format: "jpeg", quality: 92 });
+        if (r?.data && seq === this.seq) { this.lastData = ""; this.writeFrame(r.data, this.size.w, this.size.h, true); }
+      } finally { this.polling = false; }
+    }, 280);
   }
   async title() {
     const title = (await this.evalv("document.title")) || "";
@@ -388,7 +489,9 @@ class View {
         }
         if (ev.type === "mouseReleased" && this.swallowRelease) { this.swallowRelease = false; continue; }
         this.lastLocalInput = Date.now();
+        const t0 = Date.now();
         await this.send("Input.dispatchMouseEvent", ev);
+        if (ev.type !== "mouseMoved") debug(`view ${this.vid}: ${ev.type} ${ev.x},${ev.y} took ${Date.now() - t0}ms`);
       }
     } finally { this.pBusy = false; }
   }
@@ -420,7 +523,7 @@ class View {
     }
   }
   close() {
-    this.closed = true; clearInterval(this.heartbeat); clearInterval(this.pollTimer); clearTimeout(this.resizeTimer); clearTimeout(this.hqTimer); views.delete(this);
+    this.closed = true; clearInterval(this.heartbeat); clearInterval(this.watchdog); clearTimeout(this.resizeTimer); clearTimeout(this.hqTimer); views.delete(this);
     try { this.send("Page.stopScreencast"); this.ws?.close(); } catch {}
     for (const f of this.files) fs.unlink(path.join(P.frames, f), () => {});
   }
@@ -464,7 +567,7 @@ const httpServer = http.createServer((req, res) => {
   const u = new URL(req.url, "http://127.0.0.1");
   if (u.pathname === "/status" && req.method === "GET") {
     refreshTitles(true).finally(() => json(200, { engine: "webtabd", version: VERSION, ready, pid: process.pid, cdp: CDP, dpr: DPR,
-      tabs: [...tabs.values()], viewing: [...views].map((v) => v.target).filter(Boolean), claim }));
+      tabs: visibleTabs(), viewing: [...views].map((v) => v.target).filter(Boolean), claim }));
     return;
   }
   if (u.pathname === "/claim" && req.method === "POST") {
@@ -493,7 +596,11 @@ const httpServer = http.createServer((req, res) => {
 async function quit(closeBrowser) {
   quitting = true; log("quitting", closeBrowser ? "(closing the browser)" : "");
   for (const v of views) { try { v.sock.destroy(); } catch {} }
-  if (closeBrowser && browserWs) { try { browserWs.send(JSON.stringify({ id: ++bid, method: "Browser.close" })); } catch {} }
+  if (closeBrowser && browserWs) {
+    try { browserWs.send(JSON.stringify({ id: ++bid, method: "Browser.close" })); } catch {}
+    viewServer.close(); httpServer.close();
+    await waitExit(chromePid); // so the profile is free once --stop or uninstall returns
+  }
   setTimeout(() => process.exit(0), 300);
 }
 process.on("SIGTERM", () => quit(false));
