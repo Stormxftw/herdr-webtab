@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Docs: the full R&D log ([docs/research.md](docs/research.md)), every test and why it exists with
+  screenshots from testing in Herdr ([docs/testing.md](docs/testing.md)), a complete technical
+  walkthrough ([docs/how-it-works.md](docs/how-it-works.md)), and the experiment scripts
+  ([experiments/](experiments/README.md)).
+
 ## 0.2.0
 
 The first public release.

@@ -1,4 +1,7 @@
-# Architecture
+# Architecture (reference)
+
+The compact reference: pieces, frame and input rules, and the full mod ↔ engine protocol. For the
+explanation with diagrams, see [how-it-works.md](how-it-works.md).
 
 ## Pieces
 

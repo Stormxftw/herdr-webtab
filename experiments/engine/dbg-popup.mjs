@@ -1,0 +1,37 @@
+// debug: reproduce the popup-follow case with full message logging
+import fs from "node:fs"; import os from "node:os"; import path from "node:path"; import net from "node:net";
+import { spawn } from "node:child_process";
+import { findChrome, ENGINE, loadConfig, stopEngine } from "../../mods/webtab/node/common.mjs";
+const freePort = () => new Promise((r) => { const s = net.createServer().listen(0, "127.0.0.1", () => { const p = s.address().port; s.close(() => r(p)); }); });
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const HOME = fs.mkdtempSync(path.join(os.tmpdir(), "webtab-dbg-"));
+fs.mkdirSync(path.join(HOME, "data", "webtab"), { recursive: true });
+fs.writeFileSync(path.join(HOME, "data", "webtab", "config.json"), JSON.stringify({ port: await freePort(), httpPort: await freePort(), cdpPort: await freePort(), dpr: 1, home: "about:blank", chrome: findChrome({}) }));
+const cfg = loadConfig(HOME).cfg;
+const eng = spawn(process.execPath, [ENGINE, "--app-home", HOME], { stdio: "ignore", env: { ...process.env, WEBTAB_DEBUG: "1" } });
+for (let i = 0; i < 100; i++) { try { if ((await (await fetch(`http://127.0.0.1:${cfg.httpPort}/status`)).json()).ready) break; } catch {} await sleep(200); }
+const token = fs.readFileSync(path.join(HOME, "data", "webtab", "token"), "utf8").trim();
+const sock = net.connect(cfg.port, "127.0.0.1"); await new Promise((r) => sock.on("connect", r));
+const t0 = Date.now(); let buf = "";
+let attached = [];
+sock.on("data", (d) => { buf += d; let i; while ((i = buf.indexOf("\n")) >= 0) { const m = JSON.parse(buf.slice(0, i)); buf = buf.slice(i + 1); if (m.t === "attached") attached.push(m.target); if (!["ping", "tabs", "title", "cursor"].includes(m.t)) console.log(String(Date.now() - t0).padStart(6), m.t, JSON.stringify(m).slice(0, 110)); } });
+const send = (o) => { console.log(String(Date.now() - t0).padStart(6), ">>", JSON.stringify(o).slice(0, 120)); sock.write(JSON.stringify(o) + "\n"); };
+send({ t: "hello", token }); send({ t: "resize", w: 640, h: 400 });
+send({ t: "attach", target: null, url: "data:text/html," + encodeURIComponent("<a id=pop href='about:blank#popup' target='_blank' style='position:absolute;left:0;top:0;width:200px;height:100px;display:block'>open</a>") });
+await sleep(4000);
+send({ t: "mouse", type: "mousePressed", x: 50, y: 50, button: "left", buttons: 1, clickCount: 1 });
+send({ t: "mouse", type: "mouseReleased", x: 50, y: 50, button: "left", buttons: 0, clickCount: 1 });
+await sleep(2000);
+const first = attached[0], popup = attached[attached.length - 1];
+console.log("first", first, "popup", popup);
+send({ t: "switch", id: first }); await sleep(1500);
+await fetch(`http://127.0.0.1:${cfg.cdpPort}/json/close/${popup}`); await sleep(1000);
+console.log("---- agent opens a tab next to it");
+await fetch(`http://127.0.0.1:${cfg.cdpPort}/json/new?about:blank`, { method: "PUT" }); await sleep(800);
+const ws = new WebSocket(`ws://127.0.0.1:${cfg.cdpPort}/devtools/page/${first}`); await new Promise((r) => (ws.onopen = r));
+ws.onmessage = (e) => console.log(String(Date.now() - t0).padStart(6), "agent eval ->", e.data.slice(0, 100));
+ws.send(JSON.stringify({ id: 1, method: "Runtime.evaluate", params: { expression: "document.body.style.background='rgb(0,128,255)'; document.visibilityState", returnByValue: true } }));
+await sleep(3000);
+console.log("status:", JSON.stringify((await (await fetch(`http://127.0.0.1:${cfg.httpPort}/status`)).json()).tabs));
+console.log(fs.readFileSync(path.join(HOME, "data", "webtab", "webtabd.log"), "utf8"));
+sock.destroy(); await stopEngine(HOME); eng.kill(); process.exit(0);

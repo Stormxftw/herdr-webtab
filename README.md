@@ -108,7 +108,26 @@ loading never flashes blank. When the page settles, a sharper screenshot replace
 Input goes back the same way. Agents talk to Chromium directly over CDP, and the engine tells them
 apart from you: input and navigation that didn't come from Herdr are an agent's.
 
-More: [docs/architecture.md](docs/architecture.md).
+The full explanation, with diagrams, the security model and every file the installer touches, is in
+**[docs/how-it-works.md](docs/how-it-works.md)**. The message-level reference is
+[docs/architecture.md](docs/architecture.md).
+
+## How it was built and tested
+
+Nothing here is hidden. The repo includes the R&D: the approaches we tried and dropped, the
+experiment scripts, the measurements, and screenshots from testing inside Herdr.
+
+| Read | What's in it |
+|---|---|
+| [docs/research.md](docs/research.md) | The question, and the five approaches tried: a mod drawing CDP frames, Kitty graphics in a terminal, a real Chromium window docked into Herdr (two ways), and the engine + view design we kept. Why each was kept or dropped, with screenshots. |
+| [docs/testing.md](docs/testing.md) | All 28 automated tests and why each exists, the hands-on tests in Herdr with screenshots, a real Claude Code session driving the tab, the measurements behind the design, and the hunt for flaky tests. |
+| [docs/how-it-works.md](docs/how-it-works.md) | Every piece, port, file and protocol, from Chromium's pixels to Herdr's and back. |
+| [experiments/](experiments/README.md) | The scripts behind all of the above, runnable. |
+| [docs/upstream.md](docs/upstream.md) | The Herdr bug and missing mod APIs this work turned up, drafted as issues. |
+
+![Claude Code driving the web tab: the badge in the toolbar](docs/images/test-agent-badge.png)
+
+![The select menu Herdr draws for a page's dropdown](docs/images/test-dropdown-open.png)
 
 ## Security and privacy
 
