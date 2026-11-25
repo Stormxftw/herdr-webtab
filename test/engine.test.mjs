@@ -9,7 +9,7 @@ import net from "node:net";
 import http from "node:http";
 import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
-import { findChrome, ENGINE, loadConfig, stopEngine, closeChrome, portOpen } from "../mods/webtab/node/common.mjs";
+import { findChrome, ENGINE, loadConfig, stopEngine, closeChrome, portOpen, rateLimit } from "../mods/webtab/node/common.mjs";
 
 const CHROME = findChrome({});
 const FIXTURE = pathToFileURL(path.resolve("test/fixtures/page.html")).href;
@@ -160,7 +160,8 @@ test("clicks and typing from the view reach the page", { skip }, async () => {
   await waitFor(async () => (await agent.eval("window.clicks")) === 1, 5000, "click counted");
   view.send({ t: "mouse", type: "mousePressed", x: 100, y: 94, button: "left", buttons: 1, clickCount: 1 });
   view.send({ t: "mouse", type: "mouseReleased", x: 100, y: 94, button: "left", buttons: 0, clickCount: 1 });
-  await sleep(150);
+  // No pause: typing straight after a click must land where the click put the focus (it once
+  // overtook the click while the engine checked whether the click hit a <select>).
   view.send({ t: "text", text: "hello ✓" });
   await waitFor(async () => (await agent.eval("document.querySelector('#box').value")) === "hello ✓", 5000, "typed text");
   agent.close();
@@ -186,6 +187,67 @@ test("page-side strings only ever get numbers (no script injection through coord
   const agent = await agentOn(target);
   assert.equal(await agent.eval("window.pwned"), undefined);
   agent.close();
+});
+
+test("observe-only: the view's clicks, typing and navigation never reach the page; an agent still drives", { skip }, async () => {
+  const agent = await agentOn(target);
+  await agent.eval("window.clicks = 0; document.querySelector('#box').value = ''");
+  view.send({ t: "observe", on: true });
+  assert.equal((await view.next((m) => m.t === "observe", 5000, "observe ack")).on, true);
+  view.send({ t: "mouse", type: "mousePressed", x: 60, y: 40, button: "left", buttons: 1, clickCount: 1 });
+  view.send({ t: "mouse", type: "mouseReleased", x: 60, y: 40, button: "left", buttons: 0, clickCount: 1 });
+  view.send({ t: "text", text: "typed while observing" });
+  view.send({ t: "key", event: { type: "rawKeyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 } });
+  view.send({ t: "navigate", url: "about:blank#observed" });
+  view.send({ t: "reload" });
+  view.send({ t: "closetab", id: target });
+  await sleep(800);
+  // The tab first: if closetab got through, the agent's evals below would wait on a page that's gone.
+  assert.ok((await status()).tabs.some((t) => t.id === target), "the tab wasn't closed");
+  assert.equal(await agent.eval("window.clicks"), 0, "click dropped");
+  assert.equal(await agent.eval("document.querySelector('#box').value"), "", "text dropped");
+  assert.ok(!(await agent.eval("location.href")).includes("#observed"), "navigation dropped");
+  // the agent keeps driving, and the view still shows it
+  await agent.eval("document.querySelector('#box').value = 'agent'");
+  assert.equal(await agent.eval("document.querySelector('#box').value"), "agent");
+  // read-only requests still answer
+  view.send({ t: "cursor", x: 10, y: 10 });
+  await view.next((m) => m.t === "cursor", 5000, "cursor reply while observing");
+  view.send({ t: "observe", on: false });
+  await view.next((m) => m.t === "observe" && m.on === false, 5000, "observe off");
+  view.send({ t: "mouse", type: "mousePressed", x: 60, y: 40, button: "left", buttons: 1, clickCount: 1 });
+  view.send({ t: "mouse", type: "mouseReleased", x: 60, y: 40, button: "left", buttons: 0, clickCount: 1 });
+  await waitFor(async () => (await agent.eval("window.clicks")) === 1, 5000, "click reaches the page again");
+  agent.close();
+});
+
+test("the console strip gets the page's console messages, uncaught errors and failed requests", { skip }, async () => {
+  view.clear();
+  const page = `<title>c</title><img src="http://127.0.0.1:${cfg.httpPort}/no-such-file.png"><script>
+    console.log("hello", 42, { a: 1 }); console.warn("careful"); console.error("bad thing");
+    setTimeout(() => { throw new Error("boom"); }, 50);</script>`;
+  view.send({ t: "navigate", url: "data:text/html," + encodeURIComponent(page) });
+  const log = await view.next((m) => m.t === "console" && m.source === "console" && m.level === "log", 10000, "console.log");
+  assert.equal(log.text, "hello 42 {a: 1}");
+  await view.next((m) => m.t === "console" && m.level === "warn" && m.text === "careful", 5000, "console.warn");
+  await view.next((m) => m.t === "console" && m.level === "error" && m.text === "bad thing", 5000, "console.error");
+  const ex = await view.next((m) => m.t === "console" && m.source === "exception", 5000, "uncaught error");
+  assert.match(ex.text, /boom/);
+  const net = await view.next((m) => m.t === "console" && m.source === "network" && m.level === "error", 5000, "failed request");
+  assert.match(net.url, /no-such-file\.png/);
+});
+
+test("console messages are capped per view, and the rest are counted (pure)", () => {
+  const timers = { pending: [], setTimeout(fn) { this.pending.push(fn); } };
+  const reports = [];
+  const take = rateLimit(100, 1000, (n) => reports.push(n), timers);
+  let shown = 0;
+  for (let i = 0; i < 2000; i++) if (take(10_000 + Math.floor(i / 4))) shown++; // 2000 messages in 500 ms
+  assert.equal(shown, 100);
+  assert.equal(timers.pending.length, 1, "one report per burst");
+  timers.pending.shift()();
+  assert.deepEqual(reports, [1900]);
+  assert.equal(take(12_000), true, "a new second lets messages through again");
 });
 
 test("an agent navigating the page shows as a driver; a claim names it", { skip }, async () => {

@@ -9,6 +9,7 @@ import os from "node:os";
 import { execFileSync } from "node:child_process";
 
 const C = await import(new URL("./mods/webtab/node/common.mjs", import.meta.url));
+const G = await import(new URL("./mods/webtab/node/guard.mjs", import.meta.url));
 const argv = process.argv.slice(2);
 const has = (f) => argv.includes(f);
 const val = (f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : undefined; };
@@ -27,6 +28,9 @@ console.log(`herdr-webtab: uninstalling from ${C.fwd(HOME)}`);
 const { cfg, paths: P } = C.loadConfig(HOME);
 const r = await C.stopEngine(HOME, { closeBrowser: !has("--keep-browser") });
 say(r.stopped ? "engine stopped" : "engine wasn't running");
+// Guard's terminal watcher
+const gw = path.join(HOME, "mods", "webtab", "node", "guardd.mjs");
+if (fs.existsSync(gw)) quiet(() => execFileSync(process.execPath, [gw, "--stop", "--app-home", HOME], { stdio: "ignore", windowsHide: true, timeout: 10000 }));
 
 // tab bars back to Herdr's own + menu (exact original height, from the marker install.mjs left)
 const mods = path.join(HOME, "mods");
@@ -43,7 +47,7 @@ if (fs.existsSync(mods)) {
     fs.rmSync(f + ".before-webtab", { force: true });
     say(`+ menu restored: ${m}`);
   }
-  for (const m of ["webtab", "webtab-new", "new-menu-web"]) {
+  for (const m of ["webtab", "webtab-new", "webtab-guard", "new-menu-web"]) {
     const d = path.join(mods, m);
     if (fs.existsSync(d)) { fs.rmSync(d, { recursive: true, force: true }); say(`removed mod ${m}`); }
   }
@@ -91,12 +95,20 @@ const pj = C.readJson(piMcp, null);
 if (pj?.mcpServers?.webtab) { delete pj.mcpServers.webtab; fs.writeFileSync(piMcp, JSON.stringify(pj, null, 2) + "\n"); say("pi: webtab MCP server removed"); }
 fs.rmSync(piMcp + ".before-webtab", { force: true });
 
+// Guard's hook in Claude Code and Codex (only our entries; everything else in those files stays)
+const codexHome = process.env.CODEX_HOME ? path.resolve(process.env.CODEX_HOME) : path.join(USER_HOME, ".codex");
+for (const [who, file] of [["Claude Code", path.join(USER_HOME, ".claude", "settings.json")], ["Codex", path.join(codexHome, "hooks.json")]]) {
+  const j = C.readJson(file, null);
+  if (j && typeof j === "object" && G.removeGuardHook(j)) { fs.writeFileSync(file, JSON.stringify(j, null, 2) + "\n"); say(`${who}: Guard hook removed`); }
+  fs.rmSync(file + ".before-webtab", { force: true });
+}
+
 // login item
 const auto = C.autostartFile();
 if (fs.existsSync(auto)) { fs.rmSync(auto); say(`autostart removed (${C.fwd(auto)})`); }
 
 if (has("--purge")) {
   fs.rmSync(P.dir, { recursive: true, force: true });
-  say(`deleted ${C.fwd(P.dir)} (browser profile, config, pinned MCP server)`);
+  say(`deleted ${C.fwd(P.dir)} (browser profile, config, pinned MCP server, Guard rules and log)`);
 } else say(`kept ${C.fwd(P.dir)} (browser profile and config; --purge deletes it${cfg.profile.startsWith(P.dir) ? "" : `; your profile at ${C.fwd(cfg.profile)} is never deleted`})`);
 console.log("done.");

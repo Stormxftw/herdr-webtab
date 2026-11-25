@@ -20,7 +20,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import {
-  VERSION, appHome, loadConfig, findChrome, systemDpr, ensureEngine, stopEngine, engineStatus, newToken, fwd, alive, waitExit,
+  VERSION, appHome, loadConfig, findChrome, systemDpr, ensureEngine, stopEngine, engineStatus, newToken, fwd, alive, waitExit, killTree, rateLimit, NODE_DIR,
 } from "./common.mjs";
 
 const args = process.argv.slice(2);
@@ -251,7 +251,24 @@ const CURSOR_AT = (x, y) => `(() => { const e = document.elementFromPoint(${num(
   if (e.closest("a[href],button,[role=button],summary,label,select")) return "pointer";
   return e.closest("input,textarea,[contenteditable]") || (e.childNodes[0] && e.childNodes[0].nodeType === 3) ? "text" : "default"; })()`;
 
+// One console argument as text: strings as they are, other values the way DevTools previews them.
+function remoteText(a) {
+  if (!a) return "";
+  if (a.type === "string") return String(a.value);
+  const pv = a.preview;
+  if (pv && Array.isArray(pv.properties)) {
+    const more = pv.overflow ? ", …" : "";
+    const val = (x) => (x.type === "string" ? JSON.stringify(x.value) : x.value ?? x.type);
+    if (pv.subtype === "array") return `[${pv.properties.map(val).join(", ")}${more}]`;
+    if (pv.type === "object" && !pv.subtype) return `{${pv.properties.map((x) => `${x.name}: ${val(x)}`).join(", ")}${more}}`;
+  }
+  if ("value" in a) { try { return JSON.stringify(a.value); } catch { return String(a.value); } }
+  return a.unserializableValue ?? a.description ?? a.type;
+}
+
 // ---------- one view = one web tab in Herdr showing one browser tab ----------
+// What a view in observe-only mode may still ask for: nothing here touches the page.
+const VIEW_ONLY = new Set(["attach", "resize", "switch", "cursor", "copy"]);
 let viewSeq = 0;
 class View {
   constructor(sock) {
@@ -344,7 +361,7 @@ class View {
       this.emit({ t: "status", status: "reconnecting to page…" });
       setTimeout(() => this.reattach(), 600);
     };
-    await this.send("Page.enable"); await this.send("Runtime.enable");
+    await this.send("Page.enable"); await this.send("Runtime.enable"); await this.send("Log.enable");
     await this.send("Runtime.addBinding", { name: "__webtabSeen" });
     await this.send("Runtime.addBinding", { name: "__webtabVis" });
     await this.send("Page.addScriptToEvaluateOnNewDocument", { source: PROBE });
@@ -443,6 +460,26 @@ class View {
     else if (m.method === "Runtime.bindingCalled" && p.name === "__webtabSeen") {
       if (Date.now() - lastLocal(this.target, "lastLocalInput") > 600) agentActive(this.target, "input");
     } else if (m.method === "Runtime.bindingCalled" && p.name === "__webtabVis") this.setHidden(p.payload === "hidden");
+    // The console strip: what the page logs, its uncaught errors, and requests that failed.
+    else if (m.method === "Runtime.consoleAPICalled") {
+      const level = { warning: "warn", error: "error", assert: "error", debug: "debug", info: "info" }[p.type] || "log";
+      const frame = p.stackTrace?.callFrames?.[0];
+      this.consoleEntry(level, "console", (p.args || []).map(remoteText).join(" "), frame?.url, frame ? frame.lineNumber + 1 : undefined);
+    } else if (m.method === "Runtime.exceptionThrown") {
+      const d = p.exceptionDetails || {};
+      this.consoleEntry("error", "exception", d.exception?.description || d.text || "Uncaught error", d.url, d.lineNumber != null ? d.lineNumber + 1 : undefined);
+    } else if (m.method === "Log.entryAdded") {
+      const e = p.entry || {};
+      this.consoleEntry({ warning: "warn", error: "error", verbose: "debug" }[e.level] || "info", e.source || "other", e.text || "", e.url, e.lineNumber != null ? e.lineNumber + 1 : undefined);
+    }
+  }
+  // At most 100 a second per view: a page logging in a loop must not flood the mod. The rest are
+  // counted and reported as one line.
+  consoleEntry(level, source, text, url, line) {
+    const now = Date.now();
+    this.conLimit ??= rateLimit(100, 1000, (n) => { if (!this.closed) this.emit({ t: "console", level: "warn", source: "webtab", text: `${n} more console messages not shown`, at: Date.now() }); });
+    if (!this.conLimit(now)) return;
+    this.emit({ t: "console", level, source, text: String(text).slice(0, 1000), ...(url ? { url: String(url).slice(0, 300) } : {}), ...(line ? { line } : {}), at: now });
   }
   // Once the page is still, draw a sharper screenshot over the last stream frame. Also runs after
   // each load and attach: some headless builds send no screencast frame for a page that never moves.
@@ -489,6 +526,10 @@ class View {
         }
         if (ev.type === "mouseReleased" && this.swallowRelease) { this.swallowRelease = false; continue; }
         this.lastLocalInput = Date.now();
+        // Keys and text wait in the same line: typing right after a click must land where the click
+        // put the focus, not overtake the click while it checks for a <select>.
+        if (ev.kind === "key") { await this.send("Input.dispatchKeyEvent", ev.event); continue; }
+        if (ev.kind === "text") { await this.send("Input.insertText", { text: ev.text }); continue; }
         const t0 = Date.now();
         await this.send("Input.dispatchMouseEvent", ev);
         if (ev.type !== "mouseMoved") debug(`view ${this.vid}: ${ev.type} ${ev.x},${ev.y} took ${Date.now() - t0}ms`);
@@ -496,6 +537,11 @@ class View {
     } finally { this.pBusy = false; }
   }
   async cmd(c) {
+    // Observe-only: the person watches an agent work and nothing they do in the web tab reaches the
+    // page. Only what changes this view (which tab, its size, the cursor) still goes through.
+    if (c.t === "observe") { this.observe = !!c.on; log(`view ${this.vid}: observe-only ${this.observe ? "on" : "off"}`); return this.emit({ t: "observe", on: this.observe }); }
+    if (this.observe && !VIEW_ONLY.has(c.t)) { debug(`view ${this.vid}: observe-only dropped ${c.t}`); return; }
+    if (this.observe && c.t === "attach" && c.target) c = { ...c, url: null }; // showing a tab, never navigating it
     switch (c.t) {
       case "attach": return this.attach(typeof c.target === "string" ? c.target : null, typeof c.url === "string" ? c.url : null);
       case "resize": return this.resize(c);
@@ -513,8 +559,8 @@ class View {
       case "mouse": return this.pointer({ type: ["mousePressed", "mouseReleased", "mouseMoved"].includes(c.type) ? c.type : "mouseMoved", x: num(c.x), y: num(c.y),
         button: ["left", "right", "middle", "none"].includes(c.button) ? c.button : "none", buttons: num(c.buttons), clickCount: num(c.clickCount), modifiers: num(c.modifiers) });
       case "wheel": return this.pointer({ type: "mouseWheel", x: num(c.x), y: num(c.y), deltaX: num(c.dx), deltaY: num(c.dy), modifiers: num(c.modifiers) });
-      case "key": this.lastLocalInput = Date.now(); return this.send("Input.dispatchKeyEvent", c.event || {});
-      case "text": this.lastLocalInput = Date.now(); return this.send("Input.insertText", { text: String(c.text || "") });
+      case "key": this.lastLocalInput = Date.now(); this.pq.push({ kind: "key", event: c.event || {} }); return this.pumpPointer();
+      case "text": this.lastLocalInput = Date.now(); this.pq.push({ kind: "text", text: String(c.text || "") }); return this.pumpPointer();
       case "pick": this.lastLocalInput = Date.now(); return this.evalv(`(() => { const s = document.querySelector('[data-webtab-sel="${String(c.id).replace(/\D/g, "")}"]'); if (!s) return;
         s.selectedIndex = ${num(c.index) | 0}; s.dispatchEvent(new Event("input", { bubbles: true })); s.dispatchEvent(new Event("change", { bubbles: true })); })()`);
       case "dialog": this.lastLocalInput = Date.now(); return this.send("Page.handleJavaScriptDialog", { accept: !!c.accept, ...(typeof c.text === "string" ? { promptText: c.text } : {}) });
@@ -614,3 +660,17 @@ try { await ensureChrome(); await watchBrowser(); }
 catch (e) { log("browser failed:", e.message); process.exit(1); }
 ready = true;
 log("ready");
+
+// Guard's terminal watcher runs whenever the web tab does (if Guard is installed: it seeded rules.json).
+try {
+  const G = await import("./guard.mjs");
+  const gp = G.guardPaths(HOME);
+  const gc = G.loadGuardConfig(HOME);
+  let running = false;
+  try { running = alive(JSON.parse(fs.readFileSync(gp.state, "utf8")).pid); } catch {}
+  if (fs.existsSync(gp.rules) && gc.watchTerminals !== false && !running && process.env.WEBTAB_GUARD_NO_WATCHER !== "1") {
+    spawn(process.execPath, [path.join(NODE_DIR, "guardd.mjs"), "--app-home", HOME],
+      { detached: true, stdio: "ignore", windowsHide: true }).on("error", () => {}).unref();
+    log("guard: terminal watcher started");
+  }
+} catch (e) { log("guard: watcher not started:", e.message); }

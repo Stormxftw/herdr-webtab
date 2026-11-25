@@ -257,3 +257,17 @@ export function autostartFile() {
 }
 
 export const newToken = () => crypto.randomBytes(24).toString("hex");
+
+/**
+ * Lets at most `max` calls through per `ms` window. Calls over the limit return false; once per
+ * burst, `report(count)` is called a window later with how many were held back.
+ */
+export function rateLimit(max, ms, report, timers = globalThis) {
+  let win = 0, n = 0, dropped = 0;
+  return (now = Date.now()) => {
+    if (now - win >= ms) { win = now; n = 0; }
+    if (++n <= max) return true;
+    if (!dropped++) timers.setTimeout(() => { const d = dropped; dropped = 0; report(d); }, ms);
+    return false;
+  };
+}

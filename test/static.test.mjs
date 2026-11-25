@@ -20,7 +20,7 @@ test("every script parses", () => {
 });
 
 test("mod manifests are valid and never dock themselves into a layout", () => {
-  for (const m of ["webtab", "webtab-new", "new-menu-web"]) {
+  for (const m of ["webtab", "webtab-new", "webtab-guard", "new-menu-web"]) {
     const j = JSON.parse(fs.readFileSync(path.join("mods", m, "mod.json"), "utf8"));
     assert.equal(j.place, "none", m);
   }

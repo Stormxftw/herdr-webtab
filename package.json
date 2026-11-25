@@ -26,6 +26,8 @@
     "mcp",
     "claude-code",
     "codex",
-    "coding-agents"
+    "coding-agents",
+    "guard",
+    "agent-safety"
   ]
 }

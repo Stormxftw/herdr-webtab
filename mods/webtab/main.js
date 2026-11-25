@@ -4,10 +4,12 @@
 // draws it with image() and sends mouse, wheel, keys and navigation back over a local socket.
 // Agents drive the same Chromium over CDP, so you see what they do and they see what you do.
 //
-// props: { id?: string, url?: string, target?: string }
+// props: { id?: string, url?: string, target?: string, observe?: boolean }
 //   id      makes this copy's saved state its own (copies with the same props share localStorage)
 //   url     open this address in a new browser tab
 //   target  show an existing browser tab (a CDP target id)
+//   observe start observe-only: you watch, nothing you do reaches the page (the 👁 button toggles it)
+// The ▤ button opens the console strip: the page's console, uncaught errors and failed requests.
 //   herdr-app do tab.new '{"name":"🌐 Web","mod":"webtab","props":{"id":"a1","url":"https://example.com"}}'
 import { View, div, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
@@ -41,7 +43,7 @@ export default class WebTab extends View {
   init(_p, cx) {
     this.frames = []; this.incoming = null; this.status = "starting…"; this.url = ""; this.title = ""; this.loading = false;
     this.size = { width: 800, height: 600 }; this.cursor = "default"; this.fps = 0; this.buttons = 0;
-    this.tabs = []; this.activity = {}; this.driver = null; this.select = null;
+    this.tabs = []; this.activity = {}; this.driver = null; this.select = null; this.logs = [];
     this.focus = cx.focus_handle();
     try { cx.bind_keys(CLAIMED.map((k) => ({ keystroke: k, action: "webtab::" + k, context: "WebTab" }))); } catch {}
     this.addr = InputState.new({ placeholder: "Search or enter address" });
@@ -59,6 +61,9 @@ export default class WebTab extends View {
     LIVE_KEYS.set(this.key, live + 1);
     this.store = live ? memoryStore() : localStorage;
     this.claimPane();
+    const savedObserve = this.store.getItem("observe");
+    this.observe = savedObserve !== null ? savedObserve === "1" : pr.observe === true;
+    this.showConsole = this.store.getItem("console") === "1";
     if (checking()) { this.status = "web tab"; return; } // herdr-app check runs init for real: start nothing
     cx.spawn(async (cx) => this.run(cx, pr));
     // "focusable": pane.go and closing a popup over this copy send "focus".
@@ -118,6 +123,7 @@ export default class WebTab extends View {
       this.sock = await this.connect(cx);
       if (!this.sock) { cx.notify(); await cx.sleep(5000); continue; } // keep trying: the person may fix the setup
       this.status = "connected"; cx.notify();
+      this.cmd({ t: "observe", on: this.observe });
       this.cmd({ t: "resize", w: this.size.width, h: this.size.height });
       const saved = (first && pr.target) || this.store.getItem("target");
       this.cmd({ t: "attach", target: saved || null, url: first && !pr.target && !saved ? pr.url || null : null });
@@ -151,7 +157,7 @@ export default class WebTab extends View {
 
   onMsg(m, cx) {
     switch (m.t) {
-      case "attached": this.dialog = null; this.store.setItem("target", m.target); this.target = m.target; this.status = "live"; this.frames = []; this.incoming = null; this.setUrl(m.url); this.setTitle(m.title); break;
+      case "attached": this.logs = []; this.dialog = null; this.store.setItem("target", m.target); this.target = m.target; this.status = "live"; this.frames = []; this.incoming = null; this.setUrl(m.url); this.setTitle(m.title); break;
       case "frame": {
         // A new frame loads underneath, covered; it moves to the top on the next frame or after 35 ms.
         const f = { file: m.file, w: m.w, h: m.h };
@@ -162,7 +168,8 @@ export default class WebTab extends View {
       }
       case "tabs": this.tabs = m.tabs; break;
       case "nav": this.setUrl(m.url); this.select = null; break;
-      case "loading": this.loading = true; break;
+      case "loading": this.loading = true; this.logs = []; break; // a new page: a fresh console
+      case "console": this.logs.push(m); if (this.logs.length > 300) this.logs.shift(); break;
       case "loaded": this.loading = false; break;
       case "title": this.setTitle(m.title); break;
       case "cursor": this.cursor = m.cursor; break;
@@ -175,6 +182,7 @@ export default class WebTab extends View {
         break;
       }
       case "dialog-closed": this.dialog = null; break;
+      case "observe": this.observe = !!m.on; break;
       case "activity": {
         this.activity[m.target] = m.at;
         cx.timer.after(8200, (cx) => cx.notify()); // let the 🤖 on that tab fade
@@ -210,7 +218,9 @@ export default class WebTab extends View {
 
   // ---- input ----
   mods(m) { return (m.alt ? 1 : 0) | (m.control ? 2 : 0) | (m.platform ? 4 : 0) | (m.shift ? 8 : 0); }
+  setObserve(on) { this.observe = on; this.store.setItem("observe", on ? "1" : "0"); this.select = null; this.buttons = 0; this.cmd({ t: "observe", on }); }
   mouse(type, e, button) {
+    if (this.observe) return; // observe-only: watch, don't touch (the engine drops it too)
     // A release must always reach Chrome; fall back to the last position if this event has none.
     const p = e.local_position || (type === "mouseReleased" ? this.lastPos : null); if (!p) return;
     this.lastPos = p;
@@ -230,6 +240,7 @@ export default class WebTab extends View {
     this.cmd({ t: "key", event: { type: "keyUp", key, code, windowsVirtualKeyCode: vk, modifiers: mods } });
   }
   claimed(chord, cx) {
+    if (this.observe) return;
     const parts = chord.split("-"), name = parts.pop();
     if (this.dialog && (name === "enter" || name === "escape")) { this.answer(name === "enter"); cx.notify(); return; }
     if (this.select) return this.selectKey(name, cx);
@@ -262,12 +273,14 @@ export default class WebTab extends View {
         .child(div().text_size(11).text_color(t.dim).child(`${host(d.url) || "This page"} says`))
         .child(div().text_size(13).text_color(t.foreground).child(leave ? "Leave this page? Changes you made may not be saved." : d.message || " "))
         .when(d.kind === "prompt", (el) => el.child(Input.new(this.dialogInput).h(28).text_size(12.5)))
-        .child(h_flex().gap(8).justify_end()
+        .when(this.observe, (el) => el.child(div().text_size(11.5).text_color(t.dim).child("Observe-only is on: the agent answers this, or turn it off (👁) to answer yourself.")))
+        .when(!this.observe, (el) => el.child(h_flex().gap(8).justify_end()
           .when(d.kind !== "alert", (el) => el.child(btn("dlg-cancel", leave ? "Stay" : "Cancel", false, () => this.answer(false))))
-          .child(btn("dlg-ok", leave ? "Leave" : "OK", true, () => this.answer(true)))));
+          .child(btn("dlg-ok", leave ? "Leave" : "OK", true, () => this.answer(true))))));
   }
   pick(i) { if (this.select && !this.select.options[i]?.disabled) this.cmd({ t: "pick", id: this.select.id, index: i }); this.select = null; }
   key(e, cx) {
+    if (this.observe) return;
     if (this.dialog) return; // the page waits for the dialog; keys go to its buttons (Enter / Escape)
     const m = e.modifiers, mods = this.mods(m), ctl = m.control || m.platform, k = e.key;
     if (this.select && k === "space") { this.pick(this.select.hi); cx.notify(); return; }
@@ -298,6 +311,27 @@ export default class WebTab extends View {
   }
 
   // ---- drawing ----
+  // The console strip under the page: newest first, errors red, warnings amber. Read-only, so it is
+  // safe to keep open while an agent drives.
+  consoleStrip(t) {
+    if (!this.showConsole) return null;
+    const color = { error: t.blocked, warn: t.working, info: t.foreground, log: t.foreground, debug: t.dim };
+    const glyph = { error: "✖", warn: "▲", info: "ℹ", log: "›", debug: "·" };
+    const errors = this.logs.filter((l) => l.level === "error").length, warns = this.logs.filter((l) => l.level === "warn").length;
+    const rows = this.logs.slice(-150).reverse().map((l, i) => h_flex().id("log-" + i).min_h(20).px(8).gap(6).items_start().text_size(11.5)
+      .border_b(1).border_color(t.border).text_color(color[l.level] || t.foreground)
+      .child(div().w(12).flex_none().child(glyph[l.level] || "›"))
+      .child(div().flex_1().truncate().child(l.text || " "))
+      .child(div().flex_none().text_size(10.5).text_color(t.dim).child(l.url ? `${short(l.url.split("/").pop() || host(l.url), 32)}${l.line ? ":" + l.line : ""}` : l.source)));
+    return v_flex().h(150).w_full().flex_none().bg(t.surface).border_t(1).border_color(t.border)
+      .child(h_flex().h(24).px(8).gap(10).items_center().text_size(11).text_color(t.muted).bg(t.chrome)
+        .child(div().flex_1().child(`Console · ${errors} error${errors === 1 ? "" : "s"} · ${warns} warning${warns === 1 ? "" : "s"}`))
+        .child(div().id("console-clear").px(6).rounded(4).cursor_pointer().hover((s) => s.bg(t.hover)).on_click((e, cx) => { this.logs = []; cx.notify(); }).child("Clear"))
+        .child(div().id("console-close").px(6).rounded(4).cursor_pointer().hover((s) => s.bg(t.hover)).on_click((e, cx) => { this.toggleConsole(); cx.notify(); }).child("×")))
+      .child(v_flex().id("console-scroll").flex_1().overflow_y_scrollbar()
+        .children(rows.length ? rows : [div().p(8).text_size(11.5).text_color(t.dim).child("Nothing logged on this page yet.")]));
+  }
+  toggleConsole() { this.showConsole = !this.showConsole; this.store.setItem("console", this.showConsole ? "1" : "0"); }
   tabStrip(t) {
     const now = Date.now();
     const pill = (tab) => {
@@ -350,6 +384,8 @@ export default class WebTab extends View {
     const badge = this.badge(t);
     const menu = this.selectMenu(t);
     const dialog = this.dialogBox(t);
+    const strip = this.consoleStrip(t);
+    const errs = this.logs.filter((l) => l.level === "error").length, warns = this.logs.filter((l) => l.level === "warn").length;
     const bar = h_flex().h(40).px(8).gap(4).items_center().bg(t.chrome).border_b(1).border_color(t.border)
       .child(icon("back", "←", () => this.cmd({ t: "back" })))
       .child(icon("fwd", "→", () => this.cmd({ t: "forward" })))
@@ -360,6 +396,14 @@ export default class WebTab extends View {
         .child(div().text_size(11).text_color(secure ? t.done : t.dim).child(secure ? "🔒" : "ⓘ"))
         .child(Input.new(this.addr).flex_1().text_size(12.5).text_color(t.foreground)))
       .when(Boolean(badge), (el) => el.child(badge))
+      .child(div().id("observe").h(26).px(7).flex().items_center().gap(4).rounded(6).text_size(12.5).cursor_pointer()
+        .bg(this.observe ? t.accent : t.chrome).text_color(this.observe ? t.accent_foreground : t.muted)
+        .hover((s) => s.opacity(0.85)).on_click((e, cx) => { this.setObserve(!this.observe); cx.notify(); })
+        .child("👁").when(this.observe, (el) => el.child(div().text_size(11).child("Observe-only"))))
+      .child(div().id("console").h(26).px(7).flex().items_center().gap(4).rounded(6).text_size(11.5).cursor_pointer()
+        .bg(this.showConsole ? t.selected : t.chrome).text_color(errs ? t.blocked : warns ? t.working : t.muted)
+        .hover((s) => s.bg(t.hover)).on_click((e, cx) => { this.toggleConsole(); cx.notify(); })
+        .child(errs || warns ? `${errs ? "✖ " + errs : ""}${errs && warns ? " " : ""}${warns ? "▲ " + warns : ""}` : "▤"))
       .child(div().px(6).text_size(10.5).text_color(t.dim).child(this.status === "live" ? `${this.fps} fps` : short(this.status, 60)));
     // Bottom: the incoming frame (loading, covered). Above it: frames GPUI already drew, newest on top.
     const layer = (f) => image(f.file).absolute().top(0).left(0).w(f.w).h(f.h);
@@ -378,12 +422,12 @@ export default class WebTab extends View {
       .on_window_mouse_up("right", (e) => { if (this.buttons & 2) this.mouse("mouseReleased", e, "right"); })
       .on_window_mouse_move((e) => { if (this.buttons) this.mouse("mouseMoved", e); })
       .on_mouse_move((e) => { if (!this.buttons && !this.select) this.mouse("mouseMoved", e); })
-      .on_scroll_wheel((e) => { const p = e.local_position; if (p && !this.select) this.cmd({ t: "wheel", x: p.x, y: p.y, dx: -e.delta.x, dy: -e.delta.y, modifiers: this.mods(e.modifiers) }); })
+      .on_scroll_wheel((e) => { const p = e.local_position; if (p && !this.select && !this.observe) this.cmd({ t: "wheel", x: p.x, y: p.y, dx: -e.delta.x, dy: -e.delta.y, modifiers: this.mods(e.modifiers) }); })
       .on_key_down((e, cx) => { this.key(e, cx); cx.stop_propagation(); })
       .children(layers.length ? layers : [div().size_full().flex().items_center().justify_center().text_color(t.muted).child(this.status)])
       .when(Boolean(menu), (el) => el.child(menu))
       .when(Boolean(dialog), (el) => el.child(dialog));
-    return v_flex().id("root").size_full().bg(t.background).child(this.tabStrip(t)).child(bar).child(view);
+    return v_flex().id("root").size_full().bg(t.background).child(this.tabStrip(t)).child(bar).child(view).when(Boolean(strip), (el) => el.child(strip));
   }
 
   async close() {

@@ -6,6 +6,7 @@
 //   node install.mjs --key [chord]   also bind a key to "New web tab" (default ctrl-shift-y, cmd-shift-y on macOS)
 //   node install.mjs --autostart     also start the engine at login (it otherwise starts on demand)
 //   node install.mjs --no-agents     skip the MCP server and the AGENTS.local.md note
+//   node install.mjs --no-guard      skip Guard (the agent hook for Claude Code / Codex and the terminal watcher)
 //   node install.mjs --chrome <path> --profile <dir>   choose the browser binary / profile folder
 //   node install.mjs --install-chromium   download Playwright's Chromium if no browser is found
 //
@@ -18,11 +19,18 @@ import { fileURLToPath } from "node:url";
 
 const REPO = path.dirname(fileURLToPath(import.meta.url));
 const C = await import(new URL("./mods/webtab/node/common.mjs", import.meta.url));
+const G = await import(new URL("./mods/webtab/node/guard.mjs", import.meta.url));
 const argv = process.argv.slice(2);
 const has = (f) => argv.includes(f);
 const val = (f) => { const i = argv.indexOf(f); const v = i >= 0 ? argv[i + 1] : undefined; return v && !v.startsWith("--") ? v : undefined; };
 const say = (s) => console.log("  " + s);
 const warn = (s) => console.log("  ! " + s);
+const GUARD = !has("--no-guard");
+const GUARD_NOTE = `- **Guard** checks every shell command you run here before it runs. It blocks a few that can't be
+  undone (wiping a disk or home folder, force-pushing main, deleting a repo, sending keys or secrets
+  away) and asks the person first about others (publishing, force-pushing, reading secrets, running
+  scripts from the internet). When Guard blocks a command, don't try another way around it: tell the
+  person what you wanted to run and why. Rules: \`{{rules}}\`.`;
 
 const [major] = process.versions.node.split(".").map(Number);
 if (major < 22) { console.error(`herdr-webtab needs Node 22 or newer (this is ${process.version}).`); process.exit(1); }
@@ -83,12 +91,13 @@ function syncMod(name, keep = []) {
 }
 syncMod("webtab");
 syncMod("webtab-new");
+syncMod("webtab-guard");
 const baseMenu = path.join(HOME, "mods", "new-menu", "main.js");
 if (fs.existsSync(baseMenu)) {
   syncMod("new-menu-web", ["base.js"]);
   fs.copyFileSync(baseMenu, path.join(HOME, "mods", "new-menu-web", "base.js"));
 }
-say(`mods: webtab, webtab-new${fs.existsSync(baseMenu) ? ", new-menu-web" : ""}  (command palette: "New web tab")`);
+say(`mods: webtab, webtab-new, webtab-guard${fs.existsSync(baseMenu) ? ", new-menu-web" : ""}  (command palette: "New web tab")`);
 
 // ---------- 3. optional: + menu row in the person's own tab bars ----------
 const MARK = "/* webtab: was ";
@@ -208,8 +217,10 @@ if (!has("--no-agents")) {
 
   // The note agents read: Herdr's AGENTS.md tells them to read AGENTS.local.md, and Herdr never writes it.
   const notes = path.join(HOME, "AGENTS.local.md");
-  const vars = { ...cfg, engine: C.fwd(path.join(HOME, "mods", "webtab", "node", "webtabd.mjs")), agents: registered.length ? registered.join(", ").replace(" (needs pi-mcp-adapter)", "") : "agents that support MCP" };
-  const section = fs.readFileSync(path.join(REPO, "agents", "AGENTS.local.section.md"), "utf8").replace(/\{\{(\w+)\}\}/g, (_, k) => String(vars[k] ?? "")).trim();
+  const vars = { ...cfg, guardNote: GUARD ? GUARD_NOTE.replace("{{rules}}", C.fwd(G.guardPaths(HOME).rules)) : "", engine: C.fwd(path.join(HOME, "mods", "webtab", "node", "webtabd.mjs")), agents: registered.length ? registered.join(", ").replace(" (needs pi-mcp-adapter)", "") : "agents that support MCP" };
+  const section = fs.readFileSync(path.join(REPO, "agents", "AGENTS.local.section.md"), "utf8")
+    .replace(/^\{\{guardNote\}\}\r?\n/m, vars.guardNote ? vars.guardNote + "\n" : "")
+    .replace(/\{\{(\w+)\}\}/g, (_, k) => String(vars[k] ?? "")).trim();
   let cur = fs.existsSync(notes) ? fs.readFileSync(notes, "utf8") : "# Notes on this machine's Herdr setup\n";
   const BEGIN = "<!-- herdr-webtab:start", END = "<!-- herdr-webtab:end -->";
   const a = cur.indexOf(BEGIN), b = cur.indexOf(END);
@@ -218,7 +229,41 @@ if (!has("--no-agents")) {
   say(`agent note: ${C.fwd(notes)}`);
 }
 
-// ---------- 6. optional: start at login ----------
+// ---------- 6. Guard: a PreToolUse hook for Claude Code and Codex, its rules file ----------
+const guarded = [];
+if (GUARD) {
+  say(`guard rules: ${C.fwd(G.seedGuardConfig(HOME))}`);
+  const hookFile = C.fwd(path.join(HOME, "mods", "webtab", "node", "guard-hook.mjs"));
+  const hookCmd = (agent) => `"${C.fwd(process.execPath)}" "${hookFile}" --agent ${agent}`;
+  // A settings file we can't read is left alone: never overwrite what we don't understand.
+  const editJson = (file, fn) => {
+    const j = fs.existsSync(file) ? C.readJson(file, null) : {};
+    if (j === null || typeof j !== "object" || Array.isArray(j)) { warn(`guard: ${C.fwd(file)} isn't valid JSON; skipped`); return false; }
+    if (fs.existsSync(file) && !fs.existsSync(file + ".before-webtab")) fs.copyFileSync(file, file + ".before-webtab");
+    fn(j);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(j, null, 2) + "\n");
+    return true;
+  };
+  // Claude Code: ~/.claude/settings.json (user scope: every project). Bash and, on Windows, PowerShell.
+  const claudeDir = path.join(USER_HOME, ".claude");
+  if (fs.existsSync(claudeDir) || cli("claude")) {
+    if (editJson(path.join(claudeDir, "settings.json"), (j) => G.addGuardHook(j, { matcher: "Bash|PowerShell", command: hookCmd("claude") }))) guarded.push("Claude Code");
+  }
+  // Codex: $CODEX_HOME/hooks.json. Codex runs hooks only with [features] hooks on, after you trust them in /hooks.
+  const codexHome = process.env.CODEX_HOME ? path.resolve(process.env.CODEX_HOME) : path.join(USER_HOME, ".codex");
+  if (fs.existsSync(codexHome) || cli("codex")) {
+    if (editJson(path.join(codexHome, "hooks.json"), (j) => G.addGuardHook(j, { matcher: "Bash", command: hookCmd("codex") }))) {
+      guarded.push("Codex");
+      const toml = fs.existsSync(path.join(codexHome, "config.toml")) ? fs.readFileSync(path.join(codexHome, "config.toml"), "utf8") : "";
+      const off = /^\[features\][^[]*^\s*hooks\s*=\s*false/m.test(toml);
+      say(`guard: Codex ${off ? "has hooks turned OFF ([features] hooks = false in config.toml): turn them on, then" : "needs you to"} trust the new hook once (/hooks in Codex)`);
+    }
+  }
+  say(`guard: agent hook for ${guarded.length ? guarded.join(", ") : "no Claude Code or Codex found"}; terminal alerts in Herdr`);
+}
+
+// ---------- 7. optional: start at login ----------
 const node = C.fwd(process.execPath), engine = C.fwd(path.join(HOME, "mods", "webtab", "node", "webtabd.mjs"));
 if (has("--autostart")) {
   const f = C.autostartFile();
@@ -233,14 +278,21 @@ if (has("--autostart")) {
   say(`autostart: ${C.fwd(f)}`);
 }
 
-// ---------- 7. (re)start the engine and check the mods ----------
+// ---------- 8. (re)start the engine and Guard's watcher, and check the mods ----------
 const before = await C.engineStatus(cfg);
 if (before) await C.stopEngine(HOME, { closeBrowser: false }); // an older engine may still be running
 const started = has("--no-start") ? null : await C.ensureEngine(HOME);
+if (GUARD && !has("--no-start")) {
+  // An older watcher may still run: replace it with this version's.
+  try { execFileSync(process.execPath, [path.join(HOME, "mods", "webtab", "node", "guardd.mjs"), "--stop", "--app-home", HOME], { stdio: "ignore", windowsHide: true, timeout: 10000 }); } catch {}
+  const { spawn } = await import("node:child_process");
+  spawn(process.execPath, [path.join(HOME, "mods", "webtab", "node", "guardd.mjs"), "--app-home", HOME], { detached: true, stdio: "ignore", windowsHide: true }).unref();
+  say("guard: terminal watcher running");
+}
 if (started) say(started.ok ? `engine: running (CDP ${started.status.cdp}, ${started.status.tabs.length} tab(s), display scale ${started.status.dpr})` : `engine: ${started.error}`);
 const herdrApp = cli("herdr-app");
 if (herdrApp) {
-  for (const m of ["webtab", "webtab-new", ...(fs.existsSync(baseMenu) ? ["new-menu-web"] : [])]) {
+  for (const m of ["webtab", "webtab-new", "webtab-guard", ...(fs.existsSync(baseMenu) ? ["new-menu-web"] : [])]) {
     try { run(herdrApp, ["check", path.join(HOME, "mods", m)]); } catch (e) { warn(`herdr-app check ${m}: ${firstLine(e)}`); }
   }
   say("herdr-app check: done");

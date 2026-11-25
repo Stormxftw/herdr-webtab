@@ -19,4 +19,7 @@ watches and uses it while agents drive the same browser.
 - **Etiquette:** open your own tab (`new_page`) instead of navigating the one the person is viewing,
   unless they asked. Don't close tabs you didn't open. This browser profile is separate from the
   person's own browser; it is signed in only where they signed in here.
+- **Observe-only:** a web tab opened with `"observe":true` in its props (or the person's 👁 button)
+  drops the person's input, so they can watch you work without nudging the page.
+{{guardNote}}
 <!-- herdr-webtab:end -->
