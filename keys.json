@@ -1,0 +1,5 @@
+{
+  "global": {
+    "ctrl-shift-y": { "command": "mod.open", "args": { "name": "webtab-new" } }
+  }
+}

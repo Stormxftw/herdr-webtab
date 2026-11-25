@@ -1,0 +1,22 @@
+name: Bug report
+description: Something in the web tab doesn't work
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: OS, Herdr version, browser
+      placeholder: "Windows 11, Herdr 0.1.18, Chrome 157"
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Engine log
+      description: The last lines of ~/.config/herdr-app/data/webtab/webtabd.log, and `herdr-app status`
+      render: text

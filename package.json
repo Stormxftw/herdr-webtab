@@ -1,0 +1,31 @@
+{
+  "name": "herdr-webtab",
+  "version": "0.2.0",
+  "private": true,
+  "description": "A real Chromium browser tab drawn natively inside the Herdr desktop app, shared with your coding agents over CDP.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Stormxftw/herdr-webtab.git"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test --test-concurrency=1 \"test/*.test.mjs\"",
+    "install-webtab": "node install.mjs",
+    "uninstall-webtab": "node uninstall.mjs"
+  },
+  "keywords": [
+    "herdr",
+    "herdr-mod",
+    "browser",
+    "chromium",
+    "cdp",
+    "mcp",
+    "claude-code",
+    "codex",
+    "coding-agents"
+  ]
+}

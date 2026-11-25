@@ -1,0 +1,18 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>webtab fixture</title>
+<style>
+  body { margin: 0; font: 14px sans-serif; }
+  #btn { position: absolute; left: 20px; top: 20px; width: 120px; height: 40px; }
+  #box { position: absolute; left: 20px; top: 80px; width: 200px; height: 28px; }
+  #race { position: absolute; left: 20px; top: 130px; width: 160px; height: 28px; }
+  #link { position: absolute; left: 20px; top: 180px; }
+</style>
+<button id="btn" onclick="window.clicks = (window.clicks || 0) + 1">Click me</button>
+<input id="box" placeholder="type here">
+<select id="race" onchange="window.changed = this.value">
+  <optgroup label="Alliance"><option>Human</option><option>Dwarf</option></optgroup>
+  <optgroup label="Horde"><option>Orc</option><option>Tauren</option><option disabled>Goblin</option></optgroup>
+</select>
+<a id="link" href="#two">a link</a>
+<script>window.clicks = 0; window.changed = null;</script>

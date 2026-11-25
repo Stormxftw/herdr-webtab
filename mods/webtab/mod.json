@@ -1,0 +1,14 @@
+{
+  "place": "none",
+  "focusable": true,
+  "palette": [
+    {
+      "title": "New web tab",
+      "command": "mod.open",
+      "args": {
+        "name": "webtab-new"
+      },
+      "words": "browser web chrome chromium url internet page"
+    }
+  ]
+}

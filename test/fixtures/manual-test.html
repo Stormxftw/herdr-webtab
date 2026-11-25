@@ -1,0 +1,70 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>webtab test</title>
+<style>
+  body { font: 15px system-ui, sans-serif; margin: 0; background: #14111c; color: #e8e4f2; }
+  main { display: grid; grid-template-columns: 1fr 300px; gap: 18px; padding: 18px; }
+  h1 { font-size: 20px; margin: 0 0 4px; } p.sub { margin: 0 0 14px; color: #9a92b0; }
+  .card { background: #1f1a2b; border: 1px solid #352c4a; border-radius: 10px; padding: 12px 14px; margin-bottom: 12px; }
+  .card b { color: #c9a8ff; }
+  button { font: inherit; background: #7c4dff; color: #fff; border: 0; border-radius: 7px; padding: 7px 14px; cursor: pointer; }
+  input[type=text] { font: inherit; width: 100%; box-sizing: border-box; padding: 7px 9px; border-radius: 7px; border: 1px solid #4a3f66; background: #120f19; color: #fff; }
+  #scrollbox { height: 110px; overflow: auto; border: 1px solid #4a3f66; border-radius: 7px; padding: 6px 10px; background: #120f19; }
+  a { color: #8ad4ff; }
+  #checks li { list-style: none; padding: 5px 8px; margin: 3px 0; border-radius: 6px; background: #2a2238; color: #9a92b0; }
+  #checks li.ok { background: #16402b; color: #9dffc4; } #checks li.ok::before { content: "✓ "; }
+  #checks li:not(.ok)::before { content: "○ "; }
+  #checks { padding: 0; margin: 0; } #log { font: 12px ui-monospace, monospace; color: #9a92b0; max-height: 170px; overflow: auto; white-space: pre-wrap; }
+  .agent { outline: 3px solid #ffb84d; }
+</style></head>
+<body><main>
+<section>
+  <h1>Herdr webtab — input test</h1>
+  <p class="sub">Do each card; the checklist on the right turns green when the browser receives it.</p>
+  <div class="card"><b>1. Click</b> — click the button. <button id="btn">Click me</button> <span id="clicks"></span></div>
+  <div class="card"><b>2. Double-click</b> — double-click this word: <span id="dbl" style="color:#ffd27a">pineapple</span></div>
+  <div class="card"><b>3. Type</b> — click the box, type <code>hello herdr</code>, fix a typo with Backspace, press Enter.
+    <input id="txt" type="text" placeholder="type here"> <div id="typed" style="color:#9dffc4;margin-top:4px"></div></div>
+  <div class="card"><b>4. Scroll</b> — scroll inside this box to the bottom.
+    <div id="scrollbox">Line 1<br>Line 2<br>Line 3<br>Line 4<br>Line 5<br>Line 6<br>Line 7<br>Line 8<br>Line 9<br>Line 10<br>Line 11<br>Line 12<br><b id="bottom">Bottom! 🎉</b></div></div>
+  <div class="card"><b>5. Copy / paste</b> — select <span id="secret" style="color:#ffd27a">purple-herd-42</span>, press Ctrl+C, click the box, press Ctrl+V.
+    <input id="paste" type="text" placeholder="paste here"></div>
+  <div class="card"><b>6. Right-click</b> — right-click anywhere in this card.</div>
+  <div class="card"><b>7. Drag</b> — drag the slider all the way right. <input id="slider" type="range" min="0" max="100" value="0" style="width:60%"> <span id="sv">0</span></div>
+  <div class="card"><b>8. Keys</b> — with the page focused (click empty space first), press Tab, then an arrow key.</div>
+  <div class="card"><b>9. Hover</b> — hover <a href="#" id="lnk" onclick="return false">this link</a>; your pointer should turn into a hand.</div>
+  <div class="card"><b>11. Dropdown</b> — pick <i>Tauren</i>:
+    <select id="race"><optgroup label="Alliance"><option>Human</option><option>Dwarf</option><option>Night Elf</option></optgroup>
+    <optgroup label="Horde"><option>Orc</option><option>Undead</option><option>Tauren</option><option disabled>Goblin (soon)</option></optgroup></select>
+    <span id="racev" style="color:#9dffc4"></span></div>
+  <div class="card" id="agentcard"><b>10. Agent</b> — leave this one: an agent will fill it in while you watch.
+    <input id="agentbox" type="text" placeholder="the agent types here"></div>
+</section>
+<aside>
+  <div class="card"><b>Checklist</b><ul id="checks"></ul></div>
+  <div class="card"><b>Event log</b><div id="log"></div></div>
+</aside>
+</main>
+<script>
+const tests = { click: "Click", dblclick: "Double-click", type: "Typing", backspace: "Backspace", enter: "Enter", scroll: "Wheel scroll",
+  copy: "Copy (Ctrl+C)", paste: "Paste (Ctrl+V)", rightclick: "Right-click", drag: "Drag", tab: "Tab key", arrow: "Arrow key", hover: "Hover", select: "Dropdown", agent: "Agent drove it" };
+const done = {}; window.__results = done; window.__log = [];
+const ul = document.getElementById("checks");
+for (const [k, v] of Object.entries(tests)) { const li = document.createElement("li"); li.id = "c-" + k; li.textContent = v; ul.appendChild(li); }
+const pass = (k, why) => { if (done[k]) return; done[k] = Date.now(); document.getElementById("c-" + k).classList.add("ok"); log("PASS " + k + (why ? " (" + why + ")" : "")); };
+const log = (s) => { window.__log.push(s); const el = document.getElementById("log"); el.textContent = (s + "\n" + el.textContent).slice(0, 4000); };
+let n = 0;
+btn.onclick = (e) => { clicks.textContent = "clicked " + ++n + "×"; pass("click", e.isTrusted ? "trusted" : "synthetic"); };
+dbl.ondblclick = () => pass("dblclick", "selection=" + getSelection());
+txt.oninput = () => { typed.textContent = txt.value; if (/hello herdr/i.test(txt.value)) pass("type", JSON.stringify(txt.value)); };
+txt.onkeydown = (e) => { log("key " + e.key + " code=" + e.code); if (e.key === "Backspace") pass("backspace"); if (e.key === "Enter") pass("enter", JSON.stringify(txt.value)); };
+scrollbox.onscroll = () => { if (scrollbox.scrollTop + scrollbox.clientHeight >= scrollbox.scrollHeight - 4) pass("scroll", "top=" + scrollbox.scrollTop); };
+document.addEventListener("copy", () => pass("copy", JSON.stringify(String(getSelection()))));
+paste.oninput = () => { if (paste.value.includes("purple-herd-42")) pass("paste", JSON.stringify(paste.value)); };
+document.addEventListener("contextmenu", (e) => { e.preventDefault(); pass("rightclick", e.clientX + "," + e.clientY); });
+slider.oninput = () => { sv.textContent = slider.value; if (+slider.value >= 95) pass("drag", "value=" + slider.value); };
+document.addEventListener("keydown", (e) => { if (e.target === txt) return; log("key " + e.key); if (e.key === "Tab") pass("tab"); if (e.key.startsWith("Arrow")) pass("arrow", e.key); });
+lnk.onmouseenter = () => pass("hover", "cursor=" + getComputedStyle(lnk).cursor);
+race.onchange = () => { racev.textContent = race.value; if (race.value === "Tauren") pass("select", race.value); };
+agentbox.oninput = () => { if (agentbox.value.length > 5) { agentcard.classList.add("agent"); pass("agent", JSON.stringify(agentbox.value)); } };
+log("ready " + new Date().toLocaleTimeString());
+</script></body></html>
