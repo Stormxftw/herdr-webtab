@@ -22,11 +22,14 @@ flowchart LR
     M["webtab mod<br/>mods/webtab/main.js"]
     N["webtab-new mod<br/>(palette: New web tab)"]
     P["new-menu-web mod<br/>(+ menu row, optional)"]
+    GT["webtab-guard mod<br/>(Guard notifications)"]
   end
   subgraph Node["Node, in the background"]
     E["engine<br/>webtabd.mjs"]
     MCP["mcp.mjs → chrome-devtools-mcp<br/>(one per agent)"]
+    GW["guardd.mjs<br/>(terminal watcher)"]
   end
+  H["guard-hook.mjs<br/>(run by the agent before each shell command)"]
   C["Chromium, headless<br/>its own profile"]
   A["Agents in Herdr panes<br/>Claude Code · Codex · pi"]
   F[("JPEG frames<br/>data/webtab/frames")]
@@ -40,16 +43,24 @@ flowchart LR
   A -. "HTTP 127.0.0.1:9441<br/>/status /claim" .-> E
   N -- "tab.new {mod: webtab}" --> M
   P -- "mod.open webtab-new" --> N
+  A -- "PreToolUse" --> H
+  GW -- "hc ls / hc read" --> T["Herdr terminals"]
+  H -. "mod.open webtab-guard" .-> GT
+  GW -. "mod.open webtab-guard" .-> GT
 ```
 
 | Piece | File | Runs where | Job |
 |---|---|---|---|
-| The view | `mods/webtab/main.js` (~400 lines) | inside Herdr | Draws frames, tab strip, toolbar, select menus, dialog cards and the driving badge. Turns your mouse and keys into messages. |
-| The engine | `mods/webtab/node/webtabd.mjs` (~620 lines) | Node, detached | Launches and watches Chromium, streams frames to disk, replays input, tracks tabs, detects agents, serves a small HTTP API. |
+| The view | `mods/webtab/main.js` (~440 lines) | inside Herdr | Draws frames, tab strip, toolbar, select menus, dialog cards, the driving badge, the console strip and the observe-only button. Turns your mouse and keys into messages. |
+| The engine | `mods/webtab/node/webtabd.mjs` (~680 lines) | Node, detached | Launches and watches Chromium, streams frames to disk, replays input, tracks tabs, detects agents, forwards console messages, enforces observe-only, serves a small HTTP API. |
 | Shared helpers | `mods/webtab/node/common.mjs` | Node | Config, finding a browser, display scale, starting/stopping the engine, closing Chromium safely. |
 | The MCP launcher | `mods/webtab/node/mcp.mjs` | Node, one per agent | Starts the engine if needed, then hands stdio to chrome-devtools-mcp pointed at the shared browser. |
 | Palette entry | `mods/webtab-new/` | inside Herdr | "New web tab" in the command palette: opens a `webtab` tab with a fresh id. |
 | + menu row | `mods/new-menu-web/` | inside Herdr | A copy of Herdr's own + menu (taken from your install) with one more row, "Web tab". |
+| Guard policy | `mods/webtab/node/guard.mjs` | Node | The rules, the command reader, the audit log, hook registration helpers. |
+| Guard hook | `mods/webtab/node/guard-hook.mjs` | Node, once per agent shell command | Claude Code and Codex run it before each shell command; it denies, asks or logs. |
+| Guard watcher | `mods/webtab/node/guardd.mjs` | Node, detached, one at a time | Reads Herdr's shell terminals through `hc` and flags risky commands typed there. |
+| Guard notifications | `mods/webtab-guard/` | inside Herdr | Opened after an alert; posts one Herdr notification per new alert, then closes. |
 | Installer | `install.mjs`, `uninstall.mjs` | Node, once | Put all of the above in place, register agents, and undo it all. |
 
 Everything uses only Node's standard library. The one download is chrome-devtools-mcp, pinned to
@@ -238,6 +249,29 @@ takes the focused pane (the tab was just opened, so it's focused) and stores it 
 `localStorage` (`paneId`). Copies opened with the same props share `localStorage`, so the palette
 entry and the + menu always pass a fresh `id` prop.
 
+## Watching without touching, and seeing what the page says
+
+**Observe-only (👁).** The view stops sending input, and it tells the engine `observe {on: true}`; the
+engine then drops every command from that view that could change the page (clicks, keys, text,
+navigation, reload, new or closed tabs, dialog answers). Doing it in the engine means a bug in the
+view, or a second copy of the mod, can't nudge a page an agent is working on. Agents drive over their
+own CDP connections, so they aren't affected. The setting is saved per web tab, and
+`"observe": true` in props starts a tab that way.
+
+**The console strip (▤).** Each view also enables CDP's `Log` domain and forwards console messages,
+uncaught exceptions and failed requests as `console` messages (capped at 100 a second). The view keeps
+the last 300, clears them when a new page starts loading, and shows error and warning counts on the
+toolbar button. It is read-only, so it's safe to keep open while an agent drives.
+
+## Guard
+
+Guard checks shell commands against a policy. Agents' commands are checked by a `PreToolUse` hook
+**before** they run (the verdict is worked out in the hook process itself, so there's no daemon that
+could be down); commands typed into Herdr's shell terminals are read off the screen by a watcher
+**after** Enter and can only be flagged. Every catch goes to `data/webtab/guard/audit.jsonl` with
+secrets redacted, and becomes a Herdr notification. The full story, with every rule and its limits,
+is in [guard.md](guard.md).
+
 ## Security model
 
 All three ports listen on `127.0.0.1` only.
@@ -251,6 +285,9 @@ All three ports listen on `127.0.0.1` only.
 Other choices: the browser profile is its own folder (not your everyday browser), Edge is the last
 browser picked (it can sign in to the OS account on its own), chrome-devtools-mcp runs with usage
 statistics off, and page scripts only ever receive numbers.
+
+Guard adds a check on agents' shell commands. It fails open on its own errors (logged), and like
+everything here it can be changed by a process running as you; see [guard.md](guard.md).
 
 What this does **not** protect against: any program running as you can reach the DevTools port and
 drive the browser, the same as with any `--remote-debugging-port` browser. Don't sign in to accounts
@@ -267,8 +304,9 @@ in the web tab that you wouldn't let your agents use.
 | 3. `--menu` | in **your own** tab bar mods only (never Herdr's shipped ones), `openOverlay({mod: "new-menu"…})` → `"new-menu-web"`, height 512 → 560, marked `/* webtab: was 512 */` | `main.js.before-webtab`; the marker is reversed |
 | 4. `--key` | adds `ctrl-shift-y` (or your chord) → `mod.open webtab-new` to `keys.json` under `global`, unless the chord is taken | `keys.json.before-webtab` |
 | 5. Agents | `npm install chrome-devtools-mcp@1.14.0` into `data/webtab/mcp`; `claude mcp add --scope user webtab`; `codex mcp add webtab` or a marked block in `~/.codex/config.toml`; `webtab` in `~/.pi/agent/mcp.json`; a marked section in `<appHome>/AGENTS.local.md` | `.before-webtab` copies; marked blocks removed; `claude/codex mcp remove` |
-| 6. `--autostart` | Windows Startup `herdr-webtab.vbs`, macOS `~/Library/LaunchAgents/dev.herdr.webtab.plist`, or Linux `~/.config/autostart/herdr-webtab.desktop` | removed |
-| 7. Start | stops an older engine, starts this one, runs `herdr-app check` on each mod | — |
+| 6. Guard (skip with `--no-guard`) | seeds `data/webtab/guard/rules.json`; adds a `PreToolUse` entry (matcher `Bash\|PowerShell`) to `~/.claude/settings.json` and one (matcher `Bash`) to `$CODEX_HOME/hooks.json`, beside existing hooks; adds Guard to the agent note; says if Codex hooks are off | `.before-webtab` copies; only Guard's entries are removed |
+| 7. `--autostart` | Windows Startup `herdr-webtab.vbs`, macOS `~/Library/LaunchAgents/dev.herdr.webtab.plist`, or Linux `~/.config/autostart/herdr-webtab.desktop` | removed |
+| 8. Start | stops an older engine and Guard watcher, starts these, runs `herdr-app check` on each mod | — |
 
 Herdr's own `AGENTS.md` tells agents to read `AGENTS.local.md` if it exists, and Herdr never writes
 that file, so it's the right place for the note.
@@ -283,6 +321,9 @@ that file, so it's the right place for the note.
 | `data/webtab/webtabd.log` | engine log; start with `WEBTAB_DEBUG=1` for CDP timings, tab switches and visibility |
 | `data/webtab/profile/` | the browser profile, unless you chose another |
 | `data/webtab/mcp/` | the pinned chrome-devtools-mcp |
+| `data/webtab/guard/rules.json` | your Guard rules |
+| `data/webtab/guard/audit.jsonl` | Guard's log (rolls to `.old` at 1 MB; secrets redacted) |
+| `data/webtab/guard/watcher.json` | the running watcher's pid and last poll |
 
 ## Known limits
 

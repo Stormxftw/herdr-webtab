@@ -1,0 +1,34 @@
+name: Guard rule problem
+description: Guard blocked or flagged a safe command, or let a risky one through
+labels: ["guard"]
+body:
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What went wrong?
+      options:
+        - It blocked or flagged a safe command (false positive)
+        - It missed a risky command
+        - The severity is wrong (should block / ask / only log)
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: The command
+      description: Exactly as the agent or you ran it. Replace any secrets with placeholders.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: test
+    attributes:
+      label: What Guard says
+      description: 'Output of `node ~/.config/herdr-app/mods/webtab/node/guard-hook.mjs --test "<command>"`'
+      render: json
+  - type: textarea
+    id: why
+    attributes:
+      label: Why it should be different
+    validations:
+      required: true

@@ -17,4 +17,16 @@ cover is the mod inside Herdr. Before a release, on each OS you can:
 7. `node mods/webtab/node/webtabd.mjs --stop` (or close Chromium): the tab says the engine stopped,
    then comes back by itself.
 8. On a high-resolution screen, text is as sharp as in a normal browser.
-9. `node uninstall.mjs`: the tab bars, `keys.json`, `AGENTS.local.md` and agent configs are as before.
+9. **Console strip:** click ▤. Open `data:text/html,<script>console.log("hi");console.warn("w");console.error("e");throw new Error("boom")</script>`:
+   the button turns red with counts, the strip lists all four (newest first) with colours, Clear
+   empties it, and loading another page starts a fresh list.
+10. **Observe-only:** click 👁 (it turns into "Observe-only"). Clicks, scrolling, typing, the address
+    bar and Ctrl+W do nothing to the page; a `confirm()` card shows no buttons. Ask an agent to click
+    something: it still can. Close and reopen the Herdr tab: still on. Click 👁 again: input works.
+11. **Guard:** in a Herdr PowerShell or bash terminal, type `git push --force origin nosuchbranch`
+    (it fails harmlessly): within a few seconds a "Guard flagged a command from Terminal …"
+    notification appears. Ask Claude Code in Herdr to run `git push --force origin main` in a scratch
+    repo: it refuses with Guard's reason and a "Guard blocked a command from Claude Code" notification
+    appears. `node ~/.config/herdr-app/mods/webtab/node/guard-hook.mjs --recent 5` shows both.
+12. `node uninstall.mjs`: the tab bars, `keys.json`, `AGENTS.local.md` and agent configs (including
+    the Guard entries in `~/.claude/settings.json` and `~/.codex/hooks.json`) are as before.

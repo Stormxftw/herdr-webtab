@@ -78,12 +78,22 @@ Newline-delimited JSON over TCP on 127.0.0.1:`port`. The first line must be
 Mod → engine: `attach {target?, url?}`, `resize {w, h}`, `navigate {url}`, `back`, `forward`,
 `reload`, `newtab {url?}`, `closetab {id}`, `switch {id}`, `mouse {type, x, y, button, buttons,
 clickCount, modifiers}`, `wheel {x, y, dx, dy, modifiers}`, `key {event}`, `text {text}`,
-`pick {id, index}`, `dialog {accept, text?}`, `copy`, `cursor {x, y}`.
+`pick {id, index}`, `dialog {accept, text?}`, `copy`, `cursor {x, y}`, `observe {on}`.
+
+While a view is in observe-only mode the engine drops everything from it except `attach` (with
+`url` cleared, so it can show a tab but never navigate it), `resize`, `switch`, `cursor`, `copy` and
+`observe` itself.
 
 Engine → mod: `hello`, `attached {target, url, title}`, `frame {file, w, h, fps, hq}`, `tabs {tabs}`,
 `nav {url}`, `loading`, `loaded`, `title {title}`, `cursor {cursor}`, `copied {text}`,
 `select {id, selected, rect, options}`, `dialog {kind, message, value, url}`, `dialog-closed`,
-`driver {who, why, target}`, `activity {target, at}`, `status {status}`, `ping` (every 10 s).
+`driver {who, why, target}`, `activity {target, at}`, `status {status}`, `observe {on}`,
+`console {level, source, text, url?, line?, at}`, `ping` (every 10 s).
+
+`console` comes from `Runtime.consoleAPICalled` (`source: "console"`), `Runtime.exceptionThrown`
+(`"exception"`) and `Log.entryAdded` (`"network"` for failed requests, and Chromium's other sources).
+`level` is `error`, `warn`, `info`, `log` or `debug`. At most 100 a second per view; then one
+`source: "webtab"` line says how many were held back. Text is cut at 1000 characters.
 
 ## Lifecycle
 

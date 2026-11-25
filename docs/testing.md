@@ -2,7 +2,7 @@
 
 How Herdr Web Tab is tested, why each test exists, and what the tests caught. There are four kinds:
 
-1. **The automated suite** (`npm test`, 28 tests) against a real headless Chrome, in CI on Windows,
+1. **The automated suite** (`npm test`, 56 tests) against a real headless Chrome, in CI on Windows,
    macOS and Linux with Node 22 and 24.
 2. **Hands-on tests inside Herdr**, with a test page that turns green as input arrives, and
    screenshots taken with `herdr-app shot`.
@@ -23,6 +23,12 @@ Each engine test starts the real engine with a temporary Herdr app folder, rando
 throwaway browser profile, and talks to it the way the mod does (the token handshake, then NDJSON).
 Nothing touches your real Herdr setup or agent configs.
 
+**Never the default ports.** While Guard was being built, a new installer test ran after an earlier
+test had purged its config. With no config, `install.mjs` and `uninstall.mjs` fell back to the
+default ports (9440/9441/9333), found the developer's real engine there, and uninstall closed its
+browser twice. The test now writes random ports before every install, and
+[CONTRIBUTING.md](../CONTRIBUTING.md) makes "tests never touch a real setup" a rule.
+
 ### Engine (`test/engine.test.mjs`)
 
 | Test | Why it exists |
@@ -32,9 +38,12 @@ Nothing touches your real Herdr setup or agent configs.
 | the browser's DevTools socket refuses web page origins | A page that could open the DevTools WebSocket would control the whole browser. Guards against anyone adding `--remote-allow-origins=*`. |
 | the view socket needs the token | No token, a wrong token, or an HTTP request on the view port must be dropped. |
 | a view attaches, gets frames as real JPEG files under the app home | The core path: frames exist, are JPEGs (checked by magic bytes) and live where `image()` can read them. |
-| clicks and typing from the view reach the page | Input replay end to end, checked inside the page. |
+| clicks and typing from the view reach the page | Input replay end to end, checked inside the page. It types with **no pause** after the click: that once failed now and then, and turned out to be a real bug (text overtook the click while the engine checked it for a `<select>`), now fixed by queueing keys and text with the pointer. |
 | a `<select>` click becomes a menu message, and picking sets the value | Headless Chromium can't draw select menus; the engine must report options and apply the pick with `change` events. |
 | page-side strings only ever get numbers | Sends coordinates like `"0, 0); window.pwned = 1; (0"` and checks nothing ran. |
+| observe-only: the view's clicks, typing and navigation never reach the page; an agent still drives | Observe-only must be enforced by the engine, not just by the view ignoring clicks: clicks, keys, text, navigate, reload and closetab sent straight to the socket are all dropped, read-only requests still answer, and turning it off restores input. |
+| the console strip gets the page's console messages, uncaught errors and failed requests | A real page logs, warns, errors, throws and loads a missing image; each must reach the view with the right level and source (`console`, `exception`, `network`), and objects read like DevTools (`{a: 1}`, not `Object`). |
+| console messages are capped per view, and the rest are counted | A page logging in a loop must not flood the mod: at most 100 messages a second, then one "N more not shown" line. Tested as a pure function with a fake clock, because Chromium itself delivers a burst of console messages slowly (about 650 of 2000 in 12 s in our measurement), so a real page can't reliably hit the cap. |
 | an agent navigating the page shows as a driver; a claim names it | The "who's driving" badge: a second CDP client navigates, and the view must get `driver`; with a claim, the right name. |
 | tabs: new tab, tab list, switch back, close | The tab strip. |
 | two quick switches end on the second tab, and the first never navigates it | A race found in use: clicking two tabs fast could leave the view on the first one, or navigate the wrong tab. |
@@ -58,6 +67,8 @@ with `--skip-mcp-download --no-start`, so no real agent CLI or config is touched
 | a key that's already taken is left alone | Never overwrite someone's key binding. |
 | uninstall puts everything back the way it was | Byte-for-byte: tab bars, `keys.json`, `AGENTS.local.md`, Codex and pi configs. |
 | install refuses a missing Herdr app home with a clear message | The most likely first-run mistake. |
+| (within the tests above) Guard's hook | Install adds Guard's `PreToolUse` entry **beside** the person's own Claude Code hooks (theirs untouched, a backup kept) and in Codex's `hooks.json`; the installed hook really runs from its new place and denies `gh repo delete`; a re-install leaves exactly one Guard entry; uninstall restores `settings.json` byte for byte. |
+| --no-guard installs no hook and no rules | Opting out must leave agent configs alone and keep Guard out of the agent note. |
 
 ### MCP (`test/mcp.test.mjs`)
 
@@ -65,6 +76,27 @@ with `--skip-mcp-download --no-start`, so no real agent CLI or config is touched
 `mcp.mjs` the way an agent does (stdio, JSON-RPC), with no engine running: `initialize`,
 `tools/list` (must include `list_pages`), then `new_page` with a titled page. It checks that the engine
 came up by itself and that its tab list shows the agent's page.
+
+### Guard (`test/guard.test.mjs`, `test/guard-hook.test.mjs`)
+
+Guard is a policy, so its tests are mostly tables. **Every shipped rule** has commands it must catch
+and, in one shared list, the **near-misses** it must leave alone: `cat ~/.ssh/id_rsa.pub`,
+`git push origin main`, `npm run publish-docs`, `rm -r build`, a commit message or heredoc that
+*mentions* `rm -rf /`. A test fails if a rule is added without tests. Others check:
+
+| Test | Why |
+|---|---|
+| commands hidden in a shell string or a heredoc fed to a shell are still read | `bash -c "rm -rf ~"`, `powershell -Command "…"`, `eval '…'`, `bash <<EOF` must not slip past. |
+| a command split across `;` doesn't borrow flags from its neighbour | `rm -r build; cp -f a /` is two harmless commands, not `rm -rf /`. |
+| config turns rules off, changes severity and adds rules; a broken rule is skipped | A typo in someone's `rules.json` must not switch Guard off or crash the hook. |
+| a huge command is checked quickly | The hook runs before every shell command; 50 KB commands must take milliseconds (no regex blow-ups). |
+| tokens and passwords never reach the log | GitHub/Anthropic/OpenAI/AWS keys, `Authorization` headers, `password=`, passwords in URLs. |
+| Claude Code: blocked → deny with the reason; alert → ask; PowerShell checked too | The exact JSON Claude Code reads, from the real hook process. |
+| Codex: blocked → deny; alert → a warning | Codex hooks can't ask, so an alert must not turn into a silent allow or a block. |
+| safe commands, other tools and file edits pass silently and aren't logged | `apply_patch` and `Write` with scary text in them are file edits, not commands. |
+| garbage input never blocks the agent | Empty, non-JSON or odd input: exit 0, no output. Guard's bug must not stop an agent. |
+| the watcher alerts on new risky commands in shell terminals… | Runs the real watcher against a fake `hc`: what was on screen before it started is ignored, agent TUIs and finished terminals are skipped, only new prompt lines count, and a second watcher exits. |
+| prompt lines give their command; the line being typed doesn't | PowerShell, cmd, bash/zsh and short `$`/`❯` prompts; a half-typed last line never alerts. |
 
 ### Static (`test/static.test.mjs`)
 
@@ -189,6 +221,22 @@ the strip, the address bar and 30 fps, no error banners.
 
 The full manual checklist to repeat before a release is in [manual-test.md](manual-test.md).
 
+### Guard with a real agent
+
+The hook was registered in a throwaway `settings.json` and the real Claude Code CLI was asked to run
+`git push --force origin main` in a scratch repo. Claude Code didn't run it, quoted Guard's reason
+back ("force-pushes over main/master (rule git-force-push-main)"), didn't try another way, and
+offered to let the person run it or change the rule. The audit log had the attempt.
+
+Codex was tested only with the JSON it sends to hooks, not live: Codex runs hooks only with
+`[features] hooks = true` and after the person trusts the hook in `/hooks`.
+
+### Not yet tried inside Herdr
+
+The console strip, the 👁 observe-only button and Guard's notifications pass `herdr-app check`
+(which renders the mods without a window) and the engine tests, but haven't been looked at in a
+running Herdr yet. [manual-test.md](manual-test.md) lists the steps.
+
 ## 3. Measurements and experiments
 
 <a id="background-tabs"></a>
@@ -284,6 +332,16 @@ purpose and checked the right test failed:
   payload never produced code that ran. It was changed to `x: "0, 0); window.pwned = 1; (0"`, which
   does run when pasted into an unescaped `elementFromPoint(${x}, ${y})`. Now the mutation makes it
   fail, as it should. ✔
+
+For observe-only and Guard, five mutations, each caught:
+
+| Broke | Caught by |
+|---|---|
+| The engine's observe-only check (only the view would ignore input) | "observe-only: …" (the tab got closed). This first made the test **hang** instead of fail: an agent eval on the closed page never answered. The tab check now runs first, so it fails in a second. |
+| Blanking quoted text (commit messages would be blocked) | "near-misses stay quiet", "views blanks messages…" |
+| Reading `bash -c "…"` strings as commands | "commands hidden in a shell string…" |
+| Redacting the audit log | "secrets are redacted in the log" |
+| The hook's `deny` (turned into `allow`) | the three Claude Code / Codex deny tests |
 
 **Repeated runs.** Through the last rounds of fixes the engine suite passed 24 runs in a row locally
 (each run starts and kills real browsers), and then all six CI jobs.

@@ -186,3 +186,28 @@ described in [testing.md](testing.md).
   workarounds.
 - **WebRTC or a video stream** instead of JPEG files: nothing in the mod runtime can decode or draw
   video.
+
+## Afterwards: safety features (Guard, observe-only, the console strip)
+
+After 0.2.0 we compared the web tab with [StructuPath's herdr-browser](https://github.com/StructuPath/herdr-browser)
+and its sibling [herdr-guard](https://github.com/StructuPath/herdr-guard), both built for the legacy
+Herdr TUI. We took three ideas and built our own versions for the desktop app:
+
+- **Guard.** herdr-guard watches terminal panes for dangerous commands, can try a Ctrl+C, and ships a
+  Claude Code hook. We made the **agent hook the main defence**, because it sees the exact command
+  before it runs and can actually stop it, and kept terminals to **alert and log**: reading a screen
+  is always after the fact, and typing Ctrl+C into a person's terminal is worse than a notification.
+  The hook decides in its own process (no daemon to be down) and fails open on its own errors, so a
+  Guard bug can't stall an agent. The rules read commands roughly like a shell (chains, `sudo`,
+  `bash -c`, heredocs) and skip quoted messages, so a commit message that mentions the commands it blocks
+  isn't blocked itself.
+- **Observe-only.** Enforced in the engine, not only the view, so nothing from a watching web tab can
+  reach the page.
+- **The console strip.** Chromium already reports console messages, exceptions and failed requests
+  over CDP; the engine forwards them per view. Measuring showed Chromium delivers a burst of console
+  messages slowly (about 650 of 2000 in 12 s), so the 100-a-second cap is a backstop and is tested as
+  a pure function.
+
+Still open from that comparison: attaching to a browser some other tool started, recording, and
+saved QA scenarios.
+

@@ -33,6 +33,16 @@ floating window). The page is the agent's and yours at once.
   Herdr know the browser is there and how to show you a page.
 - **Starts on demand:** the browser engine starts when a web tab opens or an agent's MCP server
   starts. Nothing runs at login unless you ask for it.
+- **Console strip (▤):** the page's console messages, uncaught errors and failed requests
+  (`✖ 404 …`), live under the page. The toolbar button shows error and warning counts.
+- **Observe-only (👁):** watch an agent work without nudging the page. Your clicks, keys and
+  navigation are dropped (by the engine too, not just the view) while the agent keeps driving.
+- **Guard:** checks the shell commands Claude Code and Codex run before they run. It **blocks** the
+  ones you can't take back (wiping a disk or home folder, force-pushing `main`, deleting a repo,
+  sending keys or secrets away) and **asks you first** about risky ones (publishing, other
+  force-pushes, reading secrets, `curl | bash`). Commands typed into Herdr's terminals are checked
+  too: risky ones show up as a Herdr notification. Everything is logged with secrets redacted. See
+  **[docs/guard.md](docs/guard.md)**.
 
 ## Install
 
@@ -53,6 +63,7 @@ Or ask your Herdr agent: *"add the mod at github.com/Stormxftw/herdr-webtab and 
 | `--key [chord]` | Binds a key to "New web tab" (default `ctrl-shift-y`, `cmd-shift-y` on macOS). Herdr then treats `keys.json` as yours, so later default keys must be added by hand |
 | `--autostart` | Also starts the engine at login (Windows Startup, a macOS LaunchAgent, or Linux XDG autostart) |
 | `--no-agents` | Skips the MCP server and the agent note |
+| `--no-guard` | Skips Guard (the agent hook, its rules file and the terminal watcher) |
 | `--chrome <path>` | Uses this browser binary |
 | `--profile <dir>` | Keeps the browser profile here (default `~/.config/herdr-app/data/webtab/profile`) |
 | `--install-chromium` | Downloads Playwright's Chromium if no browser is found |
@@ -87,6 +98,9 @@ The installer registers the MCP server `webtab` and explains the rest to agents 
   `props.url`. List tabs with `curl -s http://127.0.0.1:9441/status`.
 - **Say who you are:** `curl -s -X POST "http://127.0.0.1:9441/claim?name=Claude%20Code"`. After that,
   the badge names you instead of "An agent".
+- **Let the person watch without touching:** add `"observe":true` to the web tab's props.
+- **Guard** may block a shell command, or ask the person first. The agent note tells agents not to
+  work around a block, but to say what they wanted to run.
 
 ## How it works
 
@@ -120,8 +134,9 @@ experiment scripts, the measurements, and screenshots from testing inside Herdr.
 | Read | What's in it |
 |---|---|
 | [docs/research.md](docs/research.md) | The question, and the five approaches tried: a mod drawing CDP frames, Kitty graphics in a terminal, a real Chromium window docked into Herdr (two ways), and the engine + view design we kept. Why each was kept or dropped, with screenshots. |
-| [docs/testing.md](docs/testing.md) | All 28 automated tests and why each exists, the hands-on tests in Herdr with screenshots, a real Claude Code session driving the tab, the measurements behind the design, and the hunt for flaky tests. |
+| [docs/testing.md](docs/testing.md) | All 56 automated tests and why each exists, the hands-on tests in Herdr with screenshots, a real Claude Code session driving the tab, the measurements behind the design, and the hunt for flaky tests. |
 | [docs/how-it-works.md](docs/how-it-works.md) | Every piece, port, file and protocol, from Chromium's pixels to Herdr's and back. |
+| [docs/guard.md](docs/guard.md) | Guard: every rule, how commands are read, your own rules, the audit log, and the limits. |
 | [experiments/](experiments/README.md) | The scripts behind all of the above, runnable. |
 | [docs/upstream.md](docs/upstream.md) | The Herdr bug and missing mod APIs this work turned up, drafted as issues. |
 
@@ -143,7 +158,10 @@ Everything stays on your machine, and all ports listen on `127.0.0.1` only.
   inside the web tab.
 - **chrome-devtools-mcp** runs with usage statistics off.
 - **What runs:** Node (the engine), your Chromium, and chrome-devtools-mcp. The installer downloads
-  that last one from npm, pinned to 1.14.0.
+  that last one from npm, pinned to 1.14.0. With Guard: its watcher (Node), and its hook, which your
+  agents run before each shell command.
+- **Guard** is a text policy that catches mistakes, not a sandbox: see [docs/guard.md](docs/guard.md)
+  for what it does and doesn't cover.
 
 See [SECURITY.md](SECURITY.md) to report a problem.
 
@@ -179,8 +197,10 @@ editing with `node ~/.config/herdr-app/mods/webtab/node/webtabd.mjs --stop`):
 
 ## Contributing
 
-Bug reports and pull requests are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md). `npm test` runs the
-engine, installer and MCP tests against a real headless Chrome.
+Bug reports, Guard rule reports and pull requests are welcome. [CONTRIBUTING.md](CONTRIBUTING.md)
+explains the repo, how we work and test, and what a pull request needs; please follow the
+[Code of Conduct](CODE_OF_CONDUCT.md). `npm test` runs the whole suite against a real headless
+Chrome. For help, see [SUPPORT.md](SUPPORT.md).
 
 ## Credits
 

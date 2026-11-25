@@ -1,12 +1,35 @@
 name: Bug report
-description: Something in the web tab doesn't work
+description: Something in the web tab, the engine, the installer or Guard doesn't work
+labels: ["bug"]
 body:
+  - type: markdown
+    attributes:
+      value: Thanks for reporting. Security problems go through private reporting instead (see the link on the previous page).
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part?
+      options:
+        - The web tab inside Herdr
+        - Console strip or observe-only
+        - The engine / browser
+        - Agents (MCP server, the "driving" badge)
+        - Guard
+        - The installer or uninstaller
+        - Not sure
+    validations:
+      required: true
   - type: textarea
     id: what
     attributes:
       label: What happened, and what did you expect?
     validations:
       required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: How can we make it happen?
+      placeholder: "1. Open a web tab on …\n2. Click …"
   - type: input
     id: versions
     attributes:
@@ -18,5 +41,5 @@ body:
     id: log
     attributes:
       label: Engine log
-      description: The last lines of ~/.config/herdr-app/data/webtab/webtabd.log, and `herdr-app status`
+      description: The last lines of ~/.config/herdr-app/data/webtab/webtabd.log, and `herdr-app status`. For Guard, the related lines from `guard-hook.mjs --recent 20`. Remove anything private.
       render: text
