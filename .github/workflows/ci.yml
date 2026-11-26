@@ -12,12 +12,16 @@ jobs:
         node: [22, 24]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node }}
-      - uses: browser-actions/setup-chrome@v1
+      - uses: browser-actions/setup-chrome@v2
         id: chrome
+        with:
+          # v2's default (Chrome for Testing stable) can't start renderers on the macOS runners;
+          # "latest" is the Chromium snapshot v1 installed. See issue #4.
+          chrome-version: latest
       - run: npm test
         env:
           WEBTAB_CHROME: ${{ steps.chrome.outputs.chrome-path }}
